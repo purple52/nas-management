@@ -1,0 +1,78 @@
+#!/bin/bash
+ALERT_FILE="$HOME/.disk-alerts"
+SHOW_TEMPS=false
+
+# Show temps if running with sudo or if smartctl is passwordless
+if [ "$EUID" -eq 0 ] || sudo -n smartctl -i /dev/sda >/dev/null 2>&1; then
+    SHOW_TEMPS=true
+fi
+
+echo ""
+echo "=== Disk Status ==="
+
+# RAID status
+echo ""
+echo "RAID Arrays:"
+while IFS= read -r line; do
+    if [[ "$line" =~ ^(md[0-9]+) ]]; then
+        dev="${BASH_REMATCH[1]}"
+        IFS= read -r next_line
+        if echo "$next_line" | grep -qP '\[U+\]' && ! echo "$next_line" | grep -q '_'; then
+            echo "  /dev/$dev: healthy [UU]"
+        else
+            echo "  /dev/$dev: ⚠ DEGRADED"
+        fi
+        if [[ "$next_line" =~ (check|recovery|reshape|resync) ]]; then
+            echo "    $next_line"
+        fi
+    fi
+done < /proc/mdstat
+
+# Disk space
+echo ""
+echo "Storage:"
+df -h /mnt/bucket-md0 /mnt/bucket-md1 2>/dev/null | tail -n+2 | while read fs size used avail pct mount; do
+    pct_num=${pct%\%}
+    if [ "$pct_num" -gt 90 ]; then
+        echo "  $mount: ${used}/${size} (${pct}) ⚠ LOW SPACE"
+    else
+        echo "  $mount: ${used}/${size} (${pct})"
+    fi
+done
+
+# Disk alerts
+echo ""
+if [ -f "$ALERT_FILE" ] && [ -s "$ALERT_FILE" ]; then
+    COUNT=$(wc -l < "$ALERT_FILE")
+    echo "⚠ $COUNT Disk alert(s):"
+    cat "$ALERT_FILE"
+    echo ""
+    echo "  Run: disk-clear-alerts  to clear"
+else
+    echo "Disk alerts: none"
+fi
+
+# Drive temps (only if we can run smartctl)
+if $SHOW_TEMPS; then
+    echo ""
+    echo "Drive Temperatures:"
+    for dev in /dev/sd[a-d]; do
+        [ -b "$dev" ] || continue
+        TEMP=$(sudo smartctl -A "$dev" 2>/dev/null | grep -i temperature | head -1 | awk -F "- *" '{print $2}' | awk '{print $1}')
+        MODEL=$(sudo smartctl -i "$dev" 2>/dev/null | grep "Device Model" | sed 's/.*: *//')
+        if [ -n "$TEMP" ]; then
+            if [ "$TEMP" -gt 50 ]; then
+                echo "  $dev ($MODEL): ${TEMP}°C ⚠ HOT"
+            else
+                echo "  $dev ($MODEL): ${TEMP}°C"
+            fi
+        fi
+    done
+fi
+
+echo ""
+echo "Disk commands:"
+echo "  disk-check              Show this status"
+echo "  sudo disk-check         Include drive temperatures"
+echo "  disk-clear-alerts       Clear Disk alerts"
+echo ""

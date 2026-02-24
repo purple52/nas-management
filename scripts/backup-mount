@@ -1,0 +1,46 @@
+#!/bin/bash
+MAPPER_NAME="backups"
+MOUNT_POINT="/mnt/backups"
+KEYFILE="/etc/backup-luks.key"
+
+if [ ! -b /dev/sdf ]; then
+    echo "Backup drive not connected."
+    exit 1
+fi
+
+if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    echo "Already mounted at $MOUNT_POINT"
+else
+    if [ ! -b /dev/mapper/$MAPPER_NAME ]; then
+        cryptsetup open /dev/sdf1 "$MAPPER_NAME" --key-file "$KEYFILE"
+    fi
+    mkdir -p "$MOUNT_POINT"
+    mount /dev/mapper/$MAPPER_NAME "$MOUNT_POINT"
+    echo "Mounted at $MOUNT_POINT"
+fi
+
+# Summary
+echo ""
+echo "=== Backup Drive ==="
+df -h "$MOUNT_POINT" | tail -1 | awk '{printf "Space: %s used of %s (%s free)\n", $3, $2, $4}'
+echo ""
+
+echo "Snapshots:"
+for dir in "$MOUNT_POINT"/rsnapshot/*/; do
+    [ -d "$dir" ] || continue
+    name=$(basename "$dir")
+    timestamp=$(stat -c %Y "$dir" 2>/dev/null)
+    date_str=$(date -d @"$timestamp" '+%Y-%m-%d %H:%M' 2>/dev/null)
+    size=$(du -sh "$dir" 2>/dev/null | awk '{print $1}')
+    printf "  %-14s %s  %s\n" "$name" "$date_str" "$size"
+done
+
+echo ""
+echo "Last backup runs:"
+for level in daily weekly monthly; do
+    if [ -f "$MOUNT_POINT/.last-${level}" ]; then
+        printf "  %-10s %s\n" "$level:" "$(cat "$MOUNT_POINT/.last-${level}")"
+    else
+        printf "  %-10s never\n" "$level:"
+    fi
+done

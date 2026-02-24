@@ -1,0 +1,9 @@
+#!/bin/bash
+ALERT_FILE="$HOME/.disk-alerts"
+if [ -f "$ALERT_FILE" ] && [ -s "$ALERT_FILE" ]; then
+    COUNT=$(wc -l < "$ALERT_FILE")
+    > "$ALERT_FILE"
+    echo "Cleared $COUNT alert(s)"
+else
+    echo "No alerts to clear"
+fi

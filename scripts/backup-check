@@ -1,0 +1,45 @@
+#!/bin/bash
+NOW=$(date +%s)
+STATUS_FILE="$HOME/.backup-status"
+
+echo ""
+echo "=== Backup Status ==="
+echo ""
+
+# Check if backup is currently running
+if pgrep -f "rsnapshot (daily|weekly|monthly)" > /dev/null 2>&1; then
+    echo "🔄 Backup is currently running"
+    LAST_LOG=$(tail -1 /var/log/rsnapshot.log 2>/dev/null)
+    if [ -n "$LAST_LOG" ]; then
+        echo "  $LAST_LOG"
+    fi
+    echo ""
+fi
+
+# Show status
+if [ -f "$STATUS_FILE" ]; then
+    LAST_LINE=$(grep -E "^.*(OK|ERROR|Running)" "$STATUS_FILE" | tail -1)
+    if [ -n "$LAST_LINE" ]; then
+        echo "Last activity: $LAST_LINE"
+    fi
+
+    LAST_OK=$(grep "OK daily" "$STATUS_FILE" | tail -1 | awk '{print $1}')
+    if [ -n "$LAST_OK" ]; then
+        LAST_EPOCH=$(date -d "$LAST_OK" +%s 2>/dev/null)
+        DAYS_AGO=$(( (NOW - LAST_EPOCH) / 86400 ))
+        if [ "$DAYS_AGO" -gt 3 ]; then
+            echo "⚠ Last backup was ${DAYS_AGO} days ago"
+        fi
+    else
+        echo "⚠ No successful backups recorded"
+    fi
+else
+    echo "No backup history found"
+fi
+
+echo ""
+echo "Backup commands:"
+echo "  sudo backup-run       Run backup (figures out what's needed)"
+echo "  sudo backup-mount     Mount drive and show summary"
+echo "  sudo backup-unmount   Unmount drive (safe to unplug)"
+echo ""

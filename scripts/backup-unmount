@@ -1,0 +1,17 @@
+#!/bin/bash
+MAPPER_NAME="backups"
+MOUNT_POINT="/mnt/backups"
+
+if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    umount "$MOUNT_POINT"
+    echo "Unmounted $MOUNT_POINT"
+else
+    echo "Not mounted"
+fi
+
+if [ -b /dev/mapper/$MAPPER_NAME ]; then
+    cryptsetup close "$MAPPER_NAME"
+    echo "LUKS closed - safe to unplug"
+else
+    echo "LUKS already closed"
+fi

@@ -1,0 +1,108 @@
+#!/bin/bash
+# One-stop backup script - figures out what needs running
+LOG="/home/YOURUSERNAME/.backup-status"
+MAPPER_NAME="backups"
+MOUNT_POINT="/mnt/backups"
+KEYFILE="/etc/backup-luks.key"
+NOW=$(date +%s)
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG"
+}
+
+# Check if drive is connected
+if [ ! -b /dev/sdf ]; then
+    echo "Backup drive not connected."
+    exit 0
+fi
+
+# Open LUKS if not already open
+if [ ! -b /dev/mapper/$MAPPER_NAME ]; then
+    cryptsetup open /dev/sdf1 "$MAPPER_NAME" --key-file "$KEYFILE"
+    if [ $? -ne 0 ]; then
+        log_msg "ERROR: failed to unlock drive"
+        exit 1
+    fi
+fi
+
+# Mount if not already mounted
+if ! mountpoint -q "$MOUNT_POINT"; then
+    mkdir -p "$MOUNT_POINT"
+    mount /dev/mapper/$MAPPER_NAME "$MOUNT_POINT"
+    if [ $? -ne 0 ]; then
+        log_msg "ERROR: failed to mount drive"
+        exit 1
+    fi
+fi
+
+# Determine what needs running based on last run timestamps
+needs_level() {
+    local level=$1
+    local max_age_days=$2
+    local last_file="$MOUNT_POINT/.last-${level}"
+
+    if [ ! -f "$last_file" ]; then
+        return 0
+    fi
+
+    local last_run=$(date -d "$(cat "$last_file")" +%s 2>/dev/null)
+    local age_days=$(( (NOW - last_run) / 86400 ))
+
+    [ "$age_days" -ge "$max_age_days" ]
+}
+
+RUN_MONTHLY=false
+RUN_WEEKLY=false
+RUN_DAILY=false
+
+if needs_level monthly 28; then RUN_MONTHLY=true; fi
+if needs_level weekly 6; then RUN_WEEKLY=true; fi
+if needs_level daily 1; then RUN_DAILY=true; fi
+
+# Run in correct order: monthly first, then weekly, then daily
+ANYTHING_RAN=false
+
+if $RUN_MONTHLY; then
+    log_msg "Running monthly backup..."
+    rsnapshot monthly
+    if [ $? -eq 0 ]; then
+        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-monthly" 
+        log_msg "OK monthly completed"
+    else
+        log_msg "ERROR monthly failed"
+    fi
+    ANYTHING_RAN=true
+fi
+
+if $RUN_WEEKLY; then
+    log_msg "Running weekly backup..."
+    rsnapshot weekly
+    if [ $? -eq 0 ]; then
+        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-weekly" 
+        log_msg "OK weekly completed"
+    else
+        log_msg "ERROR weekly failed"
+    fi
+    ANYTHING_RAN=true
+fi
+
+if $RUN_DAILY; then
+    log_msg "Running daily backup..."
+    rsnapshot daily
+    if [ $? -eq 0 ]; then
+        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-daily" 
+        log_msg "OK daily completed"
+    else
+        log_msg "ERROR daily failed"
+    fi
+    ANYTHING_RAN=true
+fi
+
+if ! $ANYTHING_RAN; then
+    log_msg "All backups up to date, nothing to do"
+fi
+
+# Unmount and close
+umount "$MOUNT_POINT"
+cryptsetup close "$MAPPER_NAME"
+log_msg "Drive unmounted and locked"
