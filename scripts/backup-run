@@ -1,10 +1,17 @@
 #!/bin/bash
 # One-stop backup script - figures out what needs running
-LOG="/home/YOURUSERNAME/.backup-status"
+LOG="/home/david/.backup-status"
 MAPPER_NAME="backups"
 MOUNT_POINT="/mnt/backups"
 KEYFILE="/etc/backup-luks.key"
 NOW=$(date +%s)
+LOCKFILE="/var/run/backup-run.pid"
+if [ -f "$LOCKFILE" ] && kill -0 "$(cat "$LOCKFILE")" 2>/dev/null; then
+    echo "Backup already running (PID $(cat "$LOCKFILE"))"
+    exit 0
+fi
+echo $$ > "$LOCKFILE"
+trap "rm -f $LOCKFILE" EXIT
 
 log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG"
@@ -66,7 +73,7 @@ if $RUN_MONTHLY; then
     log_msg "Running monthly backup..."
     rsnapshot monthly
     if [ $? -eq 0 ]; then
-        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-monthly" 
+        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-monthly"
         log_msg "OK monthly completed"
     else
         log_msg "ERROR monthly failed"
@@ -78,7 +85,7 @@ if $RUN_WEEKLY; then
     log_msg "Running weekly backup..."
     rsnapshot weekly
     if [ $? -eq 0 ]; then
-        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-weekly" 
+        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-weekly"
         log_msg "OK weekly completed"
     else
         log_msg "ERROR weekly failed"
@@ -90,7 +97,7 @@ if $RUN_DAILY; then
     log_msg "Running daily backup..."
     rsnapshot daily
     if [ $? -eq 0 ]; then
-        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-daily" 
+        date "+%Y-%m-%d %H:%M:%S" > "$MOUNT_POINT/.last-daily"
         log_msg "OK daily completed"
     else
         log_msg "ERROR daily failed"
