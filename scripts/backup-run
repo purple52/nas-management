@@ -13,12 +13,14 @@ fi
 cleanup() {
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
         umount "$MOUNT_POINT" 2>/dev/null
+        sync
     fi
     if [ -b /dev/mapper/"$MAPPER_NAME" ]; then
         cryptsetup close "$MAPPER_NAME" 2>/dev/null
     fi
 }
 trap cleanup EXIT
+trap 'exit 1' TERM INT HUP
 
 log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$BACKUP_STATUS_FILE"
