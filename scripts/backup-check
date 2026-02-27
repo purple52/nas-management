@@ -1,6 +1,6 @@
 #!/bin/bash
+source /etc/nas-management.conf
 NOW=$(date +%s)
-STATUS_FILE="$HOME/.backup-status"
 
 echo ""
 echo "=== Backup Status ==="
@@ -17,17 +17,17 @@ if pgrep -f "rsnapshot (daily|weekly|monthly)" > /dev/null 2>&1; then
 fi
 
 # Show status
-if [ -f "$STATUS_FILE" ]; then
-    LAST_LINE=$(grep -E "^.*(OK|ERROR|Running)" "$STATUS_FILE" | tail -1)
+if [ -f "$BACKUP_STATUS_FILE" ]; then
+    LAST_LINE=$(grep -E "^.*(OK|ERROR|Running)" "$BACKUP_STATUS_FILE" | tail -1)
     if [ -n "$LAST_LINE" ]; then
         echo "Last activity: $LAST_LINE"
     fi
 
-    LAST_OK=$(grep "OK daily" "$STATUS_FILE" | tail -1 | awk '{print $1}')
+    LAST_OK=$(grep "OK daily" "$BACKUP_STATUS_FILE" | tail -1 | awk '{print $1}')
     if [ -n "$LAST_OK" ]; then
         LAST_EPOCH=$(date -d "$LAST_OK" +%s 2>/dev/null)
         DAYS_AGO=$(( (NOW - LAST_EPOCH) / 86400 ))
-        if [ "$DAYS_AGO" -gt 3 ]; then
+        if [ "$DAYS_AGO" -gt "$BACKUP_STALE_DAYS" ]; then
             echo "⚠ Last backup was ${DAYS_AGO} days ago"
         fi
     else

@@ -104,6 +104,14 @@ If the drive is plugged in, it unlocks, mounts, runs whichever backup levels are
 
 ## Installation
 
+### Config → `/etc/`
+
+```bash
+sudo cp config/nas-management.conf /etc/nas-management.conf
+```
+
+Edit `/etc/nas-management.conf` — set `NAS_USER` to your username and adjust any paths or thresholds.
+
 ### Scripts → `/usr/local/bin/`
 
 ```bash
@@ -139,12 +147,11 @@ backup-check
 
 ### Configuration
 
-Edit these to match your setup:
+All scripts read from `/etc/nas-management.conf`. Edit that single file to set your username, device paths, mount points, and thresholds.
 
-- `backup-run`: update `LOG`, `MOUNT_POINT`, `KEYFILE` paths and backup drive device
-- `backup-run`, `smartd-notify.sh`, `mdcheck-notify.sh`, `mdadm-notify.sh`: update `YOURUSERNAME` for the status file
+Additional per-file config:
+
 - `config/rsnapshot.conf`: update `snapshot_root` and `backup` paths
-- `smartd-notify.sh`, `mdadm-notify.sh`, `mdcheck-notify.sh`: update alert file path
 - `config/smartd.conf`: update notification script path
 
 ### Dependencies
@@ -168,6 +175,7 @@ scripts/
   mdcheck-notify.sh      Called after RAID scrub completion
 
 config/
+  nas-management.conf    Shared configuration (install to /etc/)
   rsnapshot.conf         Backup configuration
   cron-backup            Cron job for nightly backups
   smartd.conf            SMART monitoring configuration

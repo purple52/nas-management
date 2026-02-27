@@ -1,2 +1,3 @@
 #!/bin/bash
-echo "$(date): SMART error on $SMARTD_DEVICE: $SMARTD_MESSAGE" >> /home/YOURUSERNAME/.disk-alerts
+source /etc/nas-management.conf
+echo "$(date): SMART error on $SMARTD_DEVICE: $SMARTD_MESSAGE" >> "$ALERT_FILE"

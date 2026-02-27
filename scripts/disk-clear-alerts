@@ -1,5 +1,5 @@
 #!/bin/bash
-ALERT_FILE="$HOME/.disk-alerts"
+source /etc/nas-management.conf
 if [ -f "$ALERT_FILE" ] && [ -s "$ALERT_FILE" ]; then
     COUNT=$(wc -l < "$ALERT_FILE")
     > "$ALERT_FILE"

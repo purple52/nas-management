@@ -1,5 +1,5 @@
 #!/bin/bash
-ALERT_FILE="/home/YOURUSERNAME/.disk-alerts"
+source /etc/nas-management.conf
 for dev in /dev/md?*; do
     [ -e "$dev" ] || continue
     name=$(basename "$dev")
