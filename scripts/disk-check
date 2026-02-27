@@ -1,5 +1,5 @@
 #!/bin/bash
-ALERT_FILE="$HOME/.disk-alerts"
+source /etc/nas-management.conf
 SHOW_TEMPS=false
 
 # Show temps if running with sudo or if smartctl is passwordless
@@ -17,7 +17,7 @@ while IFS= read -r line; do
     if [[ "$line" =~ ^(md[0-9]+) ]]; then
         dev="${BASH_REMATCH[1]}"
         IFS= read -r next_line
-        if echo "$next_line" | grep -qP '\[U+\]' && ! echo "$next_line" | grep -q '_'; then
+        if echo "$next_line" | grep -qE '\[U+\]' && ! echo "$next_line" | grep -q '_'; then
             echo "  /dev/$dev: healthy [UU]"
         else
             echo "  /dev/$dev: ⚠ DEGRADED"
@@ -31,9 +31,10 @@ done < /proc/mdstat
 # Disk space
 echo ""
 echo "Storage:"
-df -h /mnt/bucket-md0 /mnt/bucket-md1 2>/dev/null | tail -n+2 | while read fs size used avail pct mount; do
+# shellcheck disable=SC2086
+df -h $MONITORED_MOUNTS 2>/dev/null | tail -n+2 | while read fs size used avail pct mount; do
     pct_num=${pct%\%}
-    if [ "$pct_num" -gt 90 ]; then
+    if [ "$pct_num" -gt "$SPACE_WARN_PCT" ]; then
         echo "  $mount: ${used}/${size} (${pct}) ⚠ LOW SPACE"
     else
         echo "  $mount: ${used}/${size} (${pct})"
@@ -56,12 +57,13 @@ fi
 if $SHOW_TEMPS; then
     echo ""
     echo "Drive Temperatures:"
-    for dev in /dev/sd[a-d]; do
+    # shellcheck disable=SC2086
+    for dev in $DISK_DEVICES; do
         [ -b "$dev" ] || continue
         TEMP=$(sudo smartctl -A "$dev" 2>/dev/null | grep -i temperature | head -1 | awk -F "- *" '{print $2}' | awk '{print $1}')
         MODEL=$(sudo smartctl -i "$dev" 2>/dev/null | grep "Device Model" | sed 's/.*: *//')
         if [ -n "$TEMP" ]; then
-            if [ "$TEMP" -gt 50 ]; then
+            if [ "$TEMP" -gt "$TEMP_WARN_C" ]; then
                 echo "  $dev ($MODEL): ${TEMP}°C ⚠ HOT"
             else
                 echo "  $dev ($MODEL): ${TEMP}°C"

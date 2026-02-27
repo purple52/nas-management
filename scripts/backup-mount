@@ -1,9 +1,7 @@
 #!/bin/bash
-MAPPER_NAME="backups"
-MOUNT_POINT="/mnt/backups"
-KEYFILE="/etc/backup-luks.key"
+source /etc/nas-management.conf
 
-if [ ! -b /dev/sdf ]; then
+if [ ! -b "$BACKUP_DEVICE" ]; then
     echo "Backup drive not connected."
     exit 1
 fi
@@ -11,11 +9,17 @@ fi
 if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
     echo "Already mounted at $MOUNT_POINT"
 else
-    if [ ! -b /dev/mapper/$MAPPER_NAME ]; then
-        cryptsetup open /dev/sdf1 "$MAPPER_NAME" --key-file "$KEYFILE"
+    if [ ! -b /dev/mapper/"$MAPPER_NAME" ]; then
+        if ! cryptsetup open "$BACKUP_PARTITION" "$MAPPER_NAME" --key-file "$KEYFILE"; then
+            echo "ERROR: Failed to unlock LUKS device"
+            exit 1
+        fi
     fi
     mkdir -p "$MOUNT_POINT"
-    mount /dev/mapper/$MAPPER_NAME "$MOUNT_POINT"
+    if ! mount /dev/mapper/"$MAPPER_NAME" "$MOUNT_POINT"; then
+        echo "ERROR: Failed to mount filesystem"
+        exit 1
+    fi
     echo "Mounted at $MOUNT_POINT"
 fi
 
