@@ -61,8 +61,11 @@ needs_level() {
         return 0
     fi
 
-    local last_run=$(date -d "$(cat "$last_file")" +%s 2>/dev/null)
-    local age_days=$(( (NOW - last_run) / 86400 ))
+    local last_date=$(date -d "$(cat "$last_file")" +%Y-%m-%d 2>/dev/null)
+    local today=$(date +%Y-%m-%d)
+    local last_epoch=$(date -d "$last_date" +%s)
+    local today_epoch=$(date -d "$today" +%s)
+    local age_days=$(( (today_epoch - last_epoch) / 86400 ))
 
     [ "$age_days" -ge "$max_age_days" ]
 }
