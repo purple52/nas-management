@@ -55,6 +55,38 @@ ExecStartPost=/usr/local/bin/mdcheck-notify.sh
 | `sudo disk-check` | Same, plus drive temperatures |
 | `disk-clear-alerts` | Clear the alert log |
 
+## Drive Usage Monitoring
+
+A 15-minute sampler that captures per-drive I/O activity over time, intended to inform an `hdparm` spindown decision. Run it for one to two weeks, then read `drive-usage-report` and choose a timeout (or decide spindown isn't worthwhile).
+
+### How It Works
+
+Every 15 minutes, cron runs `drive-usage-sample`. The script reads cumulative read/write counters for `sda`–`sdd` from `/proc/diskstats`, diffs them against the previous run's values stored in `~/.drive-usage-state`, and appends one CSV row per drive to `~/.drive-usage.log`:
+
+```
+timestamp,drive,read_bytes,write_bytes
+2026-04-27T14:15:00,sda,0,0
+2026-04-27T14:15:00,sdb,131072,8192
+...
+```
+
+Timestamps are UTC (avoids DST shifts mid-collection); the report converts to localtime per-row when bucketing by hour. No `sysstat`/`iostat` dependency — `/proc/diskstats` exposes the same counters.
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `drive-usage-report` | Show hour-of-day heatmap and idle-run summary |
+| `drive-usage-sample` | 15-min sampler — invoked by cron, not run manually |
+
+### Reading the Report
+
+Two views:
+- **Hour-of-day heatmap:** % of samples with any I/O, by hour (localtime). Reveals quiet windows.
+- **Idle-run summary:** longest no-I/O run per drive plus counts of runs >=1h, >=2h, >=4h. Tells you whether a candidate `hdparm` timeout would actually catch idle time.
+
+If a drive shows many >=2h idle runs, a spindown of ~30 min would catch real idle time. If it never gets a >=1h run, spindown isn't worthwhile for that drive.
+
 ## Backup System
 
 Encrypted incremental backups to a removable USB drive using rsnapshot (rsync + hard links).
@@ -116,7 +148,7 @@ Edit `/etc/nas-management.conf` — set `NAS_USER` to your username and adjust a
 
 ```bash
 sudo cp scripts/* /usr/local/bin/
-sudo chmod +x /usr/local/bin/backup-* /usr/local/bin/disk-* /usr/local/bin/smartd-notify.sh /usr/local/bin/mdadm-notify.sh /usr/local/bin/mdcheck-notify.sh
+sudo chmod +x /usr/local/bin/backup-* /usr/local/bin/disk-* /usr/local/bin/drive-usage-* /usr/local/bin/smartd-notify.sh /usr/local/bin/mdadm-notify.sh /usr/local/bin/mdcheck-notify.sh
 ```
 
 ### Cron
@@ -124,6 +156,8 @@ sudo chmod +x /usr/local/bin/backup-* /usr/local/bin/disk-* /usr/local/bin/smart
 ```bash
 sudo cp config/cron-backup /etc/cron.d/backup
 sudo chmod 644 /etc/cron.d/backup
+sudo cp config/cron-drive-usage /etc/cron.d/drive-usage
+sudo chmod 644 /etc/cron.d/drive-usage
 ```
 
 ### Systemd Drop-ins
@@ -170,6 +204,8 @@ scripts/
   backup-unmount         Safely unmount and lock backup drive
   disk-check             Display disk/RAID/storage status (for login)
   disk-clear-alerts      Clear the disk alert log
+  drive-usage-sample     15-min /proc/diskstats sampler (cron)
+  drive-usage-report     Hour-of-day and idle-run report
   smartd-notify.sh       Called by smartd on SMART errors
   mdadm-notify.sh        Called by mdadm on array events
   mdcheck-notify.sh      Called after RAID scrub completion
@@ -178,6 +214,7 @@ config/
   nas-management.conf    Shared configuration (install to /etc/)
   rsnapshot.conf         Backup configuration
   cron-backup            Cron job for nightly backups
+  cron-drive-usage       Cron job for 15-min drive sampling
   smartd.conf            SMART monitoring configuration
 
 systemd/
