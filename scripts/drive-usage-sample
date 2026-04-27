@@ -43,6 +43,9 @@ if ! NEW_STATE=$(mktemp "${STATE}.tmp.XXXXXX"); then
     echo "drive-usage-sample: cannot create temp state file beside $STATE" >&2
     exit 1
 fi
+# mktemp creates 0600; relax to 0644 so the final state file matches the rest
+# of the repo's user-home dotfiles. The mode is carried through the mv.
+chmod 0644 "$NEW_STATE"
 trap 'rm -f "$NEW_STATE"' EXIT
 
 # shellcheck disable=SC2086
