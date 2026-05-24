@@ -8,11 +8,23 @@ source /etc/nas-management.conf
 
 LOG="$DRIVE_USAGE_LOG"
 MIN_TICKS=96  # 1 day × 96 samples (15-min interval)
+EXPECTED_HEADER="timestamp,drive,read_bytes,write_bytes,power_state"
 
 # Missing log is the trivial zero-data case
 if [ ! -f "$LOG" ]; then
     echo "Not enough data yet — collected 0 samples; recommend waiting for at least 1 day."
     exit 0
+fi
+
+# Refuse stale-format logs: standby/wake-up views would silently report zeros
+# if power_state columns were absent. Force the operator to rotate.
+first_line=$(head -n 1 "$LOG" 2>/dev/null || true)
+if [ "$first_line" != "$EXPECTED_HEADER" ]; then
+    echo "drive-usage-report: log header mismatch at $LOG" >&2
+    echo "drive-usage-report:   expected: $EXPECTED_HEADER" >&2
+    echo "drive-usage-report:   found:    $first_line" >&2
+    echo "drive-usage-report: rotate to upgrade: rm $LOG" >&2
+    exit 1
 fi
 
 # Drive list in config order (alphabetical from /dev/sd[a-d] glob)
@@ -72,21 +84,26 @@ BEGIN {
     n_drives = split(drive_list, drives, " ")
 }
 {
-    # $1=local hour, $2=epoch seconds, $3=ts (UTC), $4=drive, $5=read_bytes, $6=write_bytes
-    h = $1 + 0; epoch = $2 + 0; ts = $3; drive = $4; rb = $5 + 0; wb = $6 + 0
+    # $1=local hour, $2=epoch seconds, $3=ts (UTC), $4=drive, $5=read_bytes, $6=write_bytes, $7=power_state
+    h = $1 + 0; epoch = $2 + 0; ts = $3; drive = $4; rb = $5 + 0; wb = $6 + 0; power = $7
     active = (rb + wb > 0) ? 1 : 0
+    parked = (power == "standby" || power == "sleeping") ? 1 : 0
 
     # Heatmap accumulator
     bucket_total[drive, h]++
     if (active) bucket_active[drive, h]++
+    if (parked) bucket_parked[drive, h]++
 
     # Gap detection: a missing cron tick or absent-drive interval must break
-    # the idle run. Tolerance of one minute over the nominal 15-min cadence.
-    if ((drive in last_epoch) && epoch - last_epoch[drive] > 16*60) {
+    # both the idle run and the prev-state continuity. A wake transition
+    # cannot be claimed across a gap since intervening state is unknown.
+    gap = ((drive in last_epoch) && epoch - last_epoch[drive] > 16*60)
+    if (gap) {
         if (current_run[drive] > 0) {
             record_run(drive, current_run[drive])
             current_run[drive] = 0
         }
+        delete prev_power[drive]
     }
 
     if (active) {
@@ -97,6 +114,15 @@ BEGIN {
     } else {
         current_run[drive]++
     }
+
+    # Spin-up event: transition out of parked into active/idle. Counted
+    # regardless of whether this sample itself logged I/O, because the
+    # drive having woken up is the wear-cost event being tracked.
+    if ((drive in prev_power) && (prev_power[drive] == "standby" || prev_power[drive] == "sleeping") \
+        && power == "active/idle") {
+        spinups[drive]++
+    }
+    prev_power[drive] = power
 
     last_epoch[drive] = epoch
     date_part = substr(ts, 1, 10)
@@ -139,6 +165,37 @@ END {
         l = longest[d] + 0
         printf "  %s:  longest %dh%02dm | runs >=1h: %d | >=2h: %d | >=4h: %d\n", \
             d, int(l*15/60), (l*15)%60, count_1h[d]+0, count_2h[d]+0, count_4h[d]+0
+    }
+
+    # ---- Standby heatmap ----
+    # Shows whether hdparm spindown is actually engaging during expected idle
+    # windows. Should be high (close to 100) during hours the I/O heatmap is 0.
+    printf "\nHour-of-day standby (%% of samples parked):\n\n"
+    printf "      "
+    for (i = 1; i <= n_drives; i++) printf " %4s", drives[i]
+    printf "\n"
+    for (hr = 0; hr < 24; hr++) {
+        printf "  %02d  ", hr
+        for (i = 1; i <= n_drives; i++) {
+            d = drives[i]
+            tot = bucket_total[d, hr] + 0
+            par = bucket_parked[d, hr] + 0
+            pct = (tot == 0) ? 0 : int(par * 100 / tot + 0.5)
+            printf " %4d", pct
+        }
+        printf "\n"
+    }
+
+    # ---- Spin-up events ----
+    # Each transition standby/sleeping → active/idle is one wear cycle.
+    # Aim for a handful per day per drive; a high number suggests the timeout
+    # is too short for the workload.
+    printf "\nSpin-up events (standby/sleeping → active/idle transitions):\n\n"
+    for (i = 1; i <= n_drives; i++) {
+        d = drives[i]
+        total = spinups[d] + 0
+        per_day = (n_days > 0) ? (total / n_days) : 0
+        printf "  %s:  total %d over %d days (%.1f/day)\n", d, total, n_days, per_day
     }
 }
 '

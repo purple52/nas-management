@@ -57,33 +57,37 @@ ExecStartPost=/usr/local/bin/mdcheck-notify.sh
 
 ## Drive Usage Monitoring
 
-A 15-minute sampler that captures per-drive I/O activity over time, intended to inform an `hdparm` spindown decision. Run it for one to two weeks, then read `drive-usage-report` and choose a timeout (or decide spindown isn't worthwhile).
+A 15-minute sampler that captures per-drive I/O activity and power state over time. Used in two phases: first to inform an `hdparm` spindown decision, then — once a timeout is configured — to verify it's engaging and tune it.
 
 ### How It Works
 
-Every 15 minutes, cron runs `drive-usage-sample`. The script reads cumulative read/write counters for `sda`–`sdd` from `/proc/diskstats`, diffs them against the previous run's values stored in `~/.drive-usage-state`, and appends one CSV row per drive to `~/.drive-usage.log`:
+Every 15 minutes, cron runs `drive-usage-sample`. The script reads cumulative read/write counters for `sda`–`sdd` from `/proc/diskstats`, diffs them against the previous run's values stored in `~/.drive-usage-state`, queries each drive's power state via `hdparm -C` (which does not spin the drive up, unlike `smartctl`), and appends one CSV row per drive to `~/.drive-usage.log`:
 
 ```
-timestamp,drive,read_bytes,write_bytes
-2026-04-27T14:15:00,sda,0,0
-2026-04-27T14:15:00,sdb,131072,8192
+timestamp,drive,read_bytes,write_bytes,power_state
+2026-04-27T14:15:00,sda,0,0,standby
+2026-04-27T14:15:00,sdb,131072,8192,active/idle
 ...
 ```
 
 Timestamps are UTC (avoids DST shifts mid-collection); the report converts to localtime per-row when bucketing by hour. No `sysstat`/`iostat` dependency — `/proc/diskstats` exposes the same counters.
 
+If the log format changes (e.g. a new column is added), both scripts refuse to run against the old log and tell you to rotate it with `rm ~/.drive-usage.log`. The state file is unaffected and can stay in place.
+
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `drive-usage-report` | Show hour-of-day heatmap and idle-run summary |
+| `drive-usage-report` | Activity heatmap, idle-run summary, standby heatmap, spin-up counts |
 | `drive-usage-sample` | 15-min sampler — invoked by cron, not run manually |
 
 ### Reading the Report
 
-Two views:
-- **Hour-of-day heatmap:** % of samples with any I/O, by hour (localtime). Reveals quiet windows.
+Four views:
+- **Hour-of-day I/O heatmap:** % of samples with any I/O, by hour (localtime). Reveals quiet windows.
 - **Idle-run summary:** longest no-I/O run per drive plus counts of runs >=1h, >=2h, >=4h. Tells you whether a candidate `hdparm` timeout would actually catch idle time.
+- **Hour-of-day standby heatmap:** % of samples in `standby`/`sleeping`, by hour. After enabling spindown, this should be near 100 during the hours the I/O heatmap is 0. Discrepancies mean the timeout is too long or something is touching the drive.
+- **Spin-up event counts:** total `standby → active/idle` transitions per drive, plus a per-day rate. A handful per day is healthy; double digits suggests the timeout is too short for the workload.
 
 If a drive shows many >=2h idle runs, a spindown of ~30 min would catch real idle time. If it never gets a >=1h run, spindown isn't worthwhile for that drive.
 
@@ -191,7 +195,7 @@ Additional per-file config:
 ### Dependencies
 
 ```bash
-sudo apt install smartmontools mdadm rsnapshot cryptsetup acl
+sudo apt install smartmontools mdadm rsnapshot cryptsetup acl hdparm
 ```
 
 ## File Inventory

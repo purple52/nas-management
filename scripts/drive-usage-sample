@@ -8,10 +8,21 @@ source /etc/nas-management.conf
 LOG="$DRIVE_USAGE_LOG"
 STATE="$DRIVE_USAGE_STATE"
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S)
+EXPECTED_HEADER="timestamp,drive,read_bytes,write_bytes,power_state"
 
-# Ensure log has a CSV header on first ever run
-if [ ! -f "$LOG" ]; then
-    if ! echo "timestamp,drive,read_bytes,write_bytes" > "$LOG"; then
+# Ensure log has the expected CSV header; refuse to append if the format has
+# drifted (e.g. pre-spindown 4-column log). Operator must rotate manually.
+if [ -f "$LOG" ]; then
+    first_line=$(head -n 1 "$LOG" 2>/dev/null || true)
+    if [ "$first_line" != "$EXPECTED_HEADER" ]; then
+        echo "drive-usage-sample: log header mismatch at $LOG" >&2
+        echo "drive-usage-sample:   expected: $EXPECTED_HEADER" >&2
+        echo "drive-usage-sample:   found:    $first_line" >&2
+        echo "drive-usage-sample: rotate to upgrade: rm $LOG" >&2
+        exit 1
+    fi
+else
+    if ! echo "$EXPECTED_HEADER" > "$LOG"; then
         echo "drive-usage-sample: cannot write log header to $LOG" >&2
         exit 1
     fi
@@ -80,7 +91,14 @@ for dev_path in $DISK_DEVICES; do
        && [ "$cur_write" -ge "$prev_w" ]; then
         delta_r=$(( (cur_read - prev_r) * 512 ))
         delta_w=$(( (cur_write - prev_w) * 512 ))
-        if ! echo "$TIMESTAMP,$drive,$delta_r,$delta_w" >> "$LOG"; then
+
+        # `hdparm -C` reports the drive's power state without spinning it up,
+        # unlike smartctl. Possible values: active/idle, standby, sleeping,
+        # unknown. Fall back to "unknown" if hdparm is missing or fails.
+        power_state=$(hdparm -C "$dev_path" 2>/dev/null | awk '/drive state is:/ {print $NF; exit}')
+        [ -z "$power_state" ] && power_state="unknown"
+
+        if ! echo "$TIMESTAMP,$drive,$delta_r,$delta_w,$power_state" >> "$LOG"; then
             echo "drive-usage-sample: cannot append to $LOG" >&2
             exit 1
         fi
