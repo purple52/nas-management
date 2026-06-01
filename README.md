@@ -91,6 +91,16 @@ Four views:
 
 If a drive shows many >=2h idle runs, a spindown of ~30 min would catch real idle time. If it never gets a >=1h run, spindown isn't worthwhile for that drive.
 
+## Drive Spindown
+
+Once the usage report confirms long idle runs and a low spin-up rate, an `hdparm` standby timeout is made persistent via a udev rule (`config/99-nas-spindown.rules` → `/etc/udev/rules.d/`).
+
+The rule is keyed on each disk's serial (`ID_SERIAL_SHORT`), not its `sdX` name — kernel names can reorder across reboots, serials don't. It fires on `add`, so it applies on both boot and hotplug. The configured timeout is `-S 241` (30 minutes; values 241–251 encode `(N−240) × 30 min`).
+
+Only the data drives `sda`–`sdd` are included. The root drive (`sde`) and the removable backup drive (`sdf`) are deliberately excluded — root has constant background I/O that would thrash a parked disk, and the backup drive is unlocked on demand by `backup-run`.
+
+The shipped rule file holds placeholder serials and must not be installed verbatim; the install step below generates the real file from the live drive→serial mapping. After enabling, the standby heatmap and spin-up counts in `drive-usage-report` confirm it's engaging without thrashing.
+
 ## Backup System
 
 Encrypted incremental backups to a removable USB drive using rsnapshot (rsync + hard links).
@@ -128,6 +138,14 @@ A cron job runs `backup-run` at 2am daily:
 ```
 
 If the drive is plugged in, it unlocks, mounts, runs whichever backup levels are due, unmounts, and locks. If the drive isn't connected, it exits silently.
+
+### Drive Spindown
+
+The backup drive is left connected 24/7 but only used at 2am, so `backup-run` (and `backup-unmount`) issue a SCSI **STOP UNIT** (`sg_start --stop`) once the drive is unmounted and locked, parking it for the rest of the day. This USB enclosure ignores ATA standby (`hdparm -S`/`-C` return `unknown`), so the SCSI command is the only way to spin it down; it's best-effort and never affects the backup's exit status.
+
+Because this enclosure can't report power state, `smartd`'s `-n standby` guard can't tell the drive is parked, so a normal 30-min poll would wake it and undo the spindown. For that reason `smartd.conf` does **not** use `DEVICESCAN` — it lists the internal drives (`sda`–`sde`) explicitly by `/dev/disk/by-id/` and leaves `sdf` out. `backup-run` instead checks `sdf`'s SMART health and temperature while it's mounted and spun up, appending any problem to the disk alert file.
+
+Note the periodic clicking from this (helium WD/HGST) drive is normal **Preventive Wear Leveling**, not a fault — confirmed by clean SMART (0 reallocated/pending/CRC).
 
 ### Commands
 
@@ -174,6 +192,31 @@ sudo cp systemd/mdcheck_continue-notify.conf /etc/systemd/system/mdcheck_continu
 sudo systemctl daemon-reload
 ```
 
+### udev Rules (drive spindown)
+
+`config/99-nas-spindown.rules` is a template with placeholder serials — don't copy it verbatim. Generate the real rule from the live drive→serial mapping (this bakes in each disk's `ID_SERIAL_SHORT`, robust against `sdX` renaming):
+
+```bash
+command -v hdparm   # confirm path; adjust the RUN= path below if not /usr/sbin/hdparm
+{
+  echo '# NAS data-drive spindown -- hdparm -S 241 (30 min). Managed by nas-management.'
+  for d in /dev/sd[a-d]; do
+    serial=$(udevadm info --query=property --name="$d" | sed -n 's/^ID_SERIAL_SHORT=//p')
+    [ -n "$serial" ] && printf 'ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="%s", RUN+="/usr/sbin/hdparm -S 241 /dev/%%k"\n' "$serial"
+  done
+} | sudo tee /etc/udev/rules.d/99-nas-spindown.rules
+```
+
+Apply without rebooting, then verify:
+
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=add --subsystem-match=block
+for d in /dev/sd[a-d]; do echo -n "$d: "; sudo hdparm -C "$d" | sed -n 's/.*drive state is: //p'; done
+```
+
+`-S 241` is a 30-minute timeout. Drives `sde` (root) and `sdf` (backup) are excluded — the rule matches only the four data-drive serials. After a day, re-run `drive-usage-report` to confirm the standby heatmap climbs in idle hours and spin-up counts stay low.
+
 ### Login Status
 
 Add to `~/.zshrc` (or `~/.bashrc`):
@@ -195,7 +238,7 @@ Additional per-file config:
 ### Dependencies
 
 ```bash
-sudo apt install smartmontools mdadm rsnapshot cryptsetup acl hdparm
+sudo apt install smartmontools mdadm rsnapshot cryptsetup acl hdparm sg3-utils
 ```
 
 ## File Inventory
@@ -219,6 +262,7 @@ config/
   rsnapshot.conf         Backup configuration
   cron-backup            Cron job for nightly backups
   cron-drive-usage       Cron job for 15-min drive sampling
+  99-nas-spindown.rules  udev spindown rule template (install to /etc/udev/rules.d/)
   smartd.conf            SMART monitoring configuration
 
 systemd/

@@ -18,6 +18,12 @@ cleanup() {
     if [ -b /dev/mapper/"$MAPPER_NAME" ]; then
         cryptsetup close "$MAPPER_NAME" 2>/dev/null
     fi
+    # Park the backup drive so it doesn't sit spinning warm 24/7 while idle.
+    # This USB enclosure ignores ATA standby (hdparm) but honors SCSI STOP UNIT.
+    # Best-effort: a spindown failure must never affect the backup exit status.
+    if [ -b "$BACKUP_DEVICE" ] && command -v sg_start >/dev/null 2>&1; then
+        sg_start --stop "$BACKUP_DEVICE" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 trap 'exit 1' TERM INT HUP
@@ -48,6 +54,21 @@ if ! mountpoint -q "$MOUNT_POINT"; then
     if [ $? -ne 0 ]; then
         log_msg "ERROR: failed to mount drive"
         exit 1
+    fi
+fi
+
+# Health-check the backup drive while it's mounted and spun up. smartd no
+# longer polls sdf (its 30-min poll would wake it from spindown), so this is
+# where the drive's SMART health and temperature get checked. Problems are
+# appended to the shared alert file so disk-check surfaces them at login.
+if command -v smartctl >/dev/null 2>&1; then
+    health=$(smartctl -H "$BACKUP_DEVICE" 2>/dev/null | awk -F: '/overall-health/ {print $2}' | xargs)
+    if [ -n "$health" ] && [ "$health" != "PASSED" ]; then
+        echo "$(date): backup drive SMART health '$health' on $BACKUP_DEVICE" >> "$ALERT_FILE"
+    fi
+    temp=$(smartctl -A "$BACKUP_DEVICE" 2>/dev/null | awk '$1==194 {print $10; exit}')
+    if [ -n "$temp" ] && [ "$temp" -gt "$TEMP_WARN_C" ]; then
+        echo "$(date): backup drive ${temp}°C exceeds ${TEMP_WARN_C}°C on $BACKUP_DEVICE" >> "$ALERT_FILE"
     fi
 fi
 

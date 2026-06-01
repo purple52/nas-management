@@ -1,0 +1,33 @@
+# /etc/udev/rules.d/99-nas-spindown.rules
+#
+# Persistent hdparm spindown for the NAS data drives (sda-sdd).
+# Keyed on each disk's serial (ID_SERIAL_SHORT) rather than the sdX kernel
+# name, which can reorder across reboots. Fires on `add`, so it applies on
+# both boot and hotplug.
+#
+#   -S 241 = 30-minute standby timeout
+#            (values 241-251 encode (N-240) x 30 min; 1-240 are N x 5 sec).
+#
+# The root drive (sde) and removable backup drive (sdf) are intentionally
+# excluded: never spin down root (constant background I/O -> thrash + wear),
+# and the backup drive is unlocked/mounted on demand by backup-run.
+#
+# DO NOT install this file verbatim -- the serials below are placeholders.
+# Generate the real file from the live drive->serial mapping on the NAS:
+#
+#   {
+#     echo '# NAS data-drive spindown -- hdparm -S 241 (30 min). Managed by nas-management.'
+#     for d in /dev/sd[a-d]; do
+#       serial=$(udevadm info --query=property --name="$d" | sed -n 's/^ID_SERIAL_SHORT=//p')
+#       [ -n "$serial" ] && printf 'ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="%s", RUN+="/usr/sbin/hdparm -S 241 /dev/%%k"\n' "$serial"
+#     done
+#   } | sudo tee /etc/udev/rules.d/99-nas-spindown.rules
+#
+# Confirm hdparm's path first (command -v hdparm) and adjust the RUN path if
+# it is not /usr/sbin/hdparm. KERNEL=="sd[a-z]" matches whole disks, not
+# partitions. To change the timeout later, edit -S on every line.
+
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="REPLACE_WITH_sda_SERIAL", RUN+="/usr/sbin/hdparm -S 241 /dev/%k"
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="REPLACE_WITH_sdb_SERIAL", RUN+="/usr/sbin/hdparm -S 241 /dev/%k"
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="REPLACE_WITH_sdc_SERIAL", RUN+="/usr/sbin/hdparm -S 241 /dev/%k"
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="REPLACE_WITH_sdd_SERIAL", RUN+="/usr/sbin/hdparm -S 241 /dev/%k"

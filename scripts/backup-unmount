@@ -14,3 +14,11 @@ if [ -b /dev/mapper/"$MAPPER_NAME" ]; then
 else
     echo "LUKS already closed"
 fi
+
+# Park the drive (SCSI STOP UNIT) so it stops idling warm if left connected.
+# The enclosure ignores ATA standby (hdparm), so sg_start is the way in.
+if [ -b "$BACKUP_DEVICE" ] && command -v sg_start >/dev/null 2>&1; then
+    if sg_start --stop "$BACKUP_DEVICE" 2>/dev/null; then
+        echo "Backup drive spun down"
+    fi
+fi
