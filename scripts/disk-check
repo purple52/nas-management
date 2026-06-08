@@ -2,11 +2,10 @@
 source /etc/nas-management.conf
 SHOW_TEMPS=false
 
-# Show temps if running with sudo or if smartctl is passwordless.
-# -n standby keeps the probe from spinning up a parked sda on every login;
-# CHECK POWER MODE is wake-safe. If sda is in standby the probe exits non-zero
-# and temps are skipped this login — the right trade-off under spindown.
-if [ "$EUID" -eq 0 ] || sudo -n smartctl -n standby -i /dev/sda >/dev/null 2>&1; then
+# Show temps if running as root, or if passwordless sudo for smartctl works.
+# Probe with --version (no device) so it neither assumes a device letter nor
+# spins a drive up — the per-drive reads below use -n standby to stay wake-safe.
+if [ "$EUID" -eq 0 ] || sudo -n smartctl --version >/dev/null 2>&1; then
     SHOW_TEMPS=true
 fi
 

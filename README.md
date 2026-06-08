@@ -164,7 +164,7 @@ Note the periodic clicking from this (helium WD/HGST) drive is normal **Preventi
 sudo cp config/nas-management.conf /etc/nas-management.conf
 ```
 
-Edit `/etc/nas-management.conf` — set `NAS_USER` to your username and adjust any paths or thresholds.
+Edit `/etc/nas-management.conf` — set `NAS_USER` to your username and adjust paths or thresholds. Set `BACKUP_DEVICE`/`BACKUP_PARTITION` to stable `/dev/disk/by-id/` paths (**not** `/dev/sdX` — kernel letters reorder across reboots, which would point the backup at the wrong drive). `DISK_DEVICES` self-resolves to the RAID member disks from `/proc/mdstat`, so it needs no editing and follows the array through any letter shuffle. See [INSTALL.md](INSTALL.md) for the device-identifier setup and the drive-spindown runbook.
 
 ### Scripts → `/usr/local/bin/`
 

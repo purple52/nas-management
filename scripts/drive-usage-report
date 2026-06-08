@@ -27,7 +27,7 @@ if [ "$first_line" != "$EXPECTED_HEADER" ]; then
     exit 1
 fi
 
-# Drive list in config order (alphabetical from /dev/sd[a-d] glob)
+# Drive list from DISK_DEVICES (the RAID member disks, resolved in the config)
 DRIVE_LIST=""
 # shellcheck disable=SC2086
 for dev_path in $DISK_DEVICES; do

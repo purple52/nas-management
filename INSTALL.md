@@ -27,46 +27,69 @@ SCSI standby timer (the actual spindown mechanism), and `sg3-utils` provides
 sudo apt install sg3-utils sdparm
 ```
 
-## 2. Deploy the scripts
+## 2. Deploy the scripts and config
 
 ```bash
 sudo cp scripts/backup-run scripts/backup-unmount scripts/disk-check /usr/local/bin/
 sudo chmod +x /usr/local/bin/backup-run /usr/local/bin/backup-unmount /usr/local/bin/disk-check
+sudo cp config/nas-management.conf /etc/nas-management.conf
 ```
 
-## 3. Data-drive spindown — persistent udev rule (`sda`–`sdd`)
+Then edit `/etc/nas-management.conf` and set the backup drive to **stable
+`/dev/disk/by-id` paths** (never `/dev/sdX` — letters reorder). Find yours:
 
-Generate the rule from the live drive→serial mapping so it survives `sdX`
-reordering across reboots. Confirm `hdparm`'s path first:
+```bash
+udevadm info -q symlink -n /dev/sdf | tr ' ' '\n' | grep by-id   # use your backup drive's current letter
+```
+
+Set `BACKUP_DEVICE` to the whole-disk `usb-...` symlink and `BACKUP_PARTITION` to
+the same with `-part1`. `DISK_DEVICES` needs no editing — it derives the array
+members from `/proc/mdstat` at runtime. Confirm both resolve correctly:
+
+```bash
+source /etc/nas-management.conf
+echo "backup : $BACKUP_DEVICE"; [ -b "$BACKUP_DEVICE" ] && echo "  -> OK block device"
+echo "data   : $DISK_DEVICES"           # should list your RAID member disks
+```
+
+## 3. Data-drive spindown — persistent udev rule (RAID members)
+
+Generate the rule from the **actual RAID member disks** (not an `sd[a-d]` glob —
+device letters reorder across reboots, and a letter glob will silently pick up the
+root drive and miss an array drive). The rule is serial-keyed, so once generated it
+follows the physical drives regardless of letters. Confirm `hdparm`'s path first:
 
 ```bash
 command -v hdparm   # expect /usr/sbin/hdparm; adjust the RUN path below if different
+
+mapfile -t ARRAY_DISKS < <(awk '/^md[0-9]/{for(i=1;i<=NF;i++) if($i ~ /^sd[a-z]+[0-9]*\[/){d=$i; sub(/\[.*/,"",d); sub(/[0-9]+$/,"",d); print d}}' /proc/mdstat | sort -u)
+printf 'array disk: %s\n' "${ARRAY_DISKS[@]}"      # sanity-check the list before writing the rule
+
 {
-  echo '# NAS data-drive spindown -- hdparm -S 241 (30 min). Managed by nas-management.'
-  for d in /dev/sd[a-d]; do
-    serial=$(udevadm info --query=property --name="$d" | sed -n 's/^ID_SERIAL_SHORT=//p')
+  echo '# NAS data-drive spindown -- hdparm -S 241 (30 min). Generated from RAID members.'
+  for d in "${ARRAY_DISKS[@]}"; do
+    serial=$(udevadm info -q property -n "/dev/$d" | sed -n 's/^ID_SERIAL_SHORT=//p')
     [ -n "$serial" ] && printf 'ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="%s", RUN+="/usr/sbin/hdparm -S 241 /dev/%%k"\n' "$serial"
   done
 } | sudo tee /etc/udev/rules.d/99-nas-spindown.rules
 ```
 
-`-S 241` = 30-minute standby timeout. `sde` (root) and `sdf` (backup) are
-deliberately excluded — never spin down root, and `sdf` is handled in step 4.
+`-S 241` = 30-minute standby timeout. The root drive and the USB backup drive are
+excluded by construction (they aren't RAID members); the backup drive is handled in
+step 4.
 
-Apply without rebooting and verify all four drives matched:
+Apply without rebooting and verify each array disk matched (and that root does not):
 
 ```bash
 sudo udevadm control --reload-rules
 sudo udevadm trigger --action=add --subsystem-match=block
-for d in sda sdb sdc sdd; do
-  echo -n "$d: "; sudo udevadm test /sys/block/$d 2>&1 | grep -o 'hdparm -S 241 /dev/sd.' || echo "NO MATCH"
+for d in "${ARRAY_DISKS[@]}"; do
+  echo -n "$d: "; sudo udevadm test /sys/block/$d 2>&1 | grep -o "hdparm -S 241 /dev/$d" || echo "NO MATCH"
 done
 ```
 
-Each line should print `hdparm -S 241 /dev/sdX`. Any `NO MATCH` means that drive's
-serial didn't make it in — re-run the generator. (`config/99-nas-spindown.rules`
-in the repo is a placeholder template; the generator above is what produces the
-real file.)
+Each line should print `hdparm -S 241 /dev/sdX`. (`config/99-nas-spindown.rules` in
+the repo is a placeholder template; the generator above produces the real file.)
 
 ## 4. USB backup drive — enclosure standby timer (`sdparm`)
 
