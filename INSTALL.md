@@ -59,15 +59,18 @@ device letters reorder across reboots, and a letter glob will silently pick up t
 root drive and miss an array drive). The rule is serial-keyed, so once generated it
 follows the physical drives regardless of letters. Confirm `hdparm`'s path first:
 
+These snippets use a `while read` pipe (no `mapfile`) so they work under both bash
+and zsh — the NAS's interactive shell is zsh, where `mapfile` doesn't exist.
+
 ```bash
 command -v hdparm   # expect /usr/sbin/hdparm; adjust the RUN path below if different
 
-mapfile -t ARRAY_DISKS < <(awk '/^md[0-9]/{for(i=1;i<=NF;i++) if($i ~ /^sd[a-z]+[0-9]*\[/){d=$i; sub(/\[.*/,"",d); sub(/[0-9]+$/,"",d); print d}}' /proc/mdstat | sort -u)
-printf 'array disk: %s\n' "${ARRAY_DISKS[@]}"      # sanity-check the list before writing the rule
+# Sanity-check the member list before writing anything:
+awk '/^md[0-9]/{for(i=1;i<=NF;i++) if($i ~ /^sd[a-z]+[0-9]*\[/){d=$i; sub(/\[.*/,"",d); sub(/[0-9]+$/,"",d); print d}}' /proc/mdstat | sort -u
 
 {
   echo '# NAS data-drive spindown -- hdparm -S 241 (30 min). Generated from RAID members.'
-  for d in "${ARRAY_DISKS[@]}"; do
+  awk '/^md[0-9]/{for(i=1;i<=NF;i++) if($i ~ /^sd[a-z]+[0-9]*\[/){d=$i; sub(/\[.*/,"",d); sub(/[0-9]+$/,"",d); print d}}' /proc/mdstat | sort -u | while read -r d; do
     serial=$(udevadm info -q property -n "/dev/$d" | sed -n 's/^ID_SERIAL_SHORT=//p')
     [ -n "$serial" ] && printf 'ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="%s", RUN+="/usr/sbin/hdparm -S 241 /dev/%%k"\n' "$serial"
   done
@@ -78,12 +81,13 @@ printf 'array disk: %s\n' "${ARRAY_DISKS[@]}"      # sanity-check the list befor
 excluded by construction (they aren't RAID members); the backup drive is handled in
 step 4.
 
-Apply without rebooting and verify each array disk matched (and that root does not):
+Confirm the rules were written, apply, and verify each array disk matched:
 
 ```bash
+grep -c '^ACTION' /etc/udev/rules.d/99-nas-spindown.rules   # expect one line per array disk
 sudo udevadm control --reload-rules
 sudo udevadm trigger --action=add --subsystem-match=block
-for d in "${ARRAY_DISKS[@]}"; do
+awk '/^md[0-9]/{for(i=1;i<=NF;i++) if($i ~ /^sd[a-z]+[0-9]*\[/){d=$i; sub(/\[.*/,"",d); sub(/[0-9]+$/,"",d); print d}}' /proc/mdstat | sort -u | while read -r d; do
   echo -n "$d: "; sudo udevadm test /sys/block/$d 2>&1 | grep -o "hdparm -S 241 /dev/$d" || echo "NO MATCH"
 done
 ```

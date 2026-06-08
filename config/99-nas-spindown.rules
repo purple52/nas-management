@@ -16,10 +16,11 @@
 # Generate the real file on the NAS from the actual RAID members, so it can never
 # pick up root or miss an array drive when device letters shuffle:
 #
-#   mapfile -t ARRAY_DISKS < <(awk '/^md[0-9]/{for(i=1;i<=NF;i++) if($i ~ /^sd[a-z]+[0-9]*\[/){d=$i; sub(/\[.*/,"",d); sub(/[0-9]+$/,"",d); print d}}' /proc/mdstat | sort -u)
+# (uses a `while read` pipe, not mapfile, so it works under zsh too):
+#
 #   {
 #     echo '# NAS data-drive spindown -- hdparm -S 241 (30 min). Generated from RAID members.'
-#     for d in "${ARRAY_DISKS[@]}"; do
+#     awk '/^md[0-9]/{for(i=1;i<=NF;i++) if($i ~ /^sd[a-z]+[0-9]*\[/){d=$i; sub(/\[.*/,"",d); sub(/[0-9]+$/,"",d); print d}}' /proc/mdstat | sort -u | while read -r d; do
 #       serial=$(udevadm info -q property -n "/dev/$d" | sed -n 's/^ID_SERIAL_SHORT=//p')
 #       [ -n "$serial" ] && printf 'ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="%s", RUN+="/usr/sbin/hdparm -S 241 /dev/%%k"\n' "$serial"
 #     done
