@@ -97,7 +97,7 @@ Once the usage report confirms long idle runs and a low spin-up rate, an `hdparm
 
 The rule is keyed on each disk's serial (`ID_SERIAL_SHORT`), not its `sdX` name — kernel names can reorder across reboots, serials don't. It fires on `add`, so it applies on both boot and hotplug. The configured timeout is `-S 241` (30 minutes; values 241–251 encode `(N−240) × 30 min`).
 
-Only the data drives `sda`–`sdd` are included. The root drive (`sde`) and the removable backup drive (`sdf`) are deliberately excluded — root has constant background I/O that would thrash a parked disk, and the backup drive is unlocked on demand by `backup-run`.
+Only the RAID member disks are included. The root drive and the removable USB backup drive are deliberately excluded — root has constant background I/O that would thrash a parked disk, and the backup drive is unlocked on demand by `backup-run`. The rule is generated from `/proc/mdstat` (RAID membership), not a device-letter glob, so a kernel letter reorder can't make it pick up root or miss an array drive.
 
 The shipped rule file holds placeholder serials and must not be installed verbatim; the install step below generates the real file from the live drive→serial mapping. After enabling, the standby heatmap and spin-up counts in `drive-usage-report` confirm it's engaging without thrashing.
 
@@ -143,7 +143,7 @@ If the drive is plugged in, it unlocks, mounts, runs whichever backup levels are
 
 The backup drive is left connected 24/7 but only used at 2am. Its WD Elements enclosure ignores ATA standby (`hdparm -S`/`-C` return `unknown`), so spindown is handled two ways: the enclosure's own SCSI **STANDBY_Z timer** (set via `sdparm` to 15 min — see INSTALL.md) parks the drive after any idle period and re-parks it after stray wakes, and `backup-run`/`backup-unmount` additionally issue a SCSI **STOP UNIT** (`sg_start --stop`) once unmounted and locked to park it immediately rather than waiting out the timer. The `sg_start` step is best-effort and never affects the backup's exit status.
 
-Because this enclosure can't report power state, `smartd`'s `-n standby` guard can't tell the drive is parked, so a normal 30-min poll would wake it and undo the spindown. For that reason `smartd.conf` does **not** use `DEVICESCAN` — it lists the internal drives (`sda`–`sde`) explicitly by `/dev/disk/by-id/` and leaves `sdf` out. `backup-run` instead checks `sdf`'s SMART health and temperature while it's mounted and spun up, appending any problem to the disk alert file.
+Because this enclosure can't report power state, `smartd`'s `-n standby` guard can't tell the drive is parked, so a normal 30-min poll would wake it and undo the spindown. For that reason `smartd.conf` does **not** use `DEVICESCAN` — it lists the internal SATA drives (root + array members) explicitly by `/dev/disk/by-id/`, selected by transport so the USB backup drive is left out regardless of its device letter. `backup-run` instead checks `sdf`'s SMART health and temperature while it's mounted and spun up, appending any problem to the disk alert file.
 
 Note the periodic clicking from this (helium WD/HGST) drive is normal **Preventive Wear Leveling**, not a fault — confirmed by clean SMART (0 reallocated/pending/CRC).
 
@@ -194,28 +194,17 @@ sudo systemctl daemon-reload
 
 ### udev Rules (drive spindown)
 
-`config/99-nas-spindown.rules` is a template with placeholder serials — don't copy it verbatim. Generate the real rule from the live drive→serial mapping (this bakes in each disk's `ID_SERIAL_SHORT`, robust against `sdX` renaming):
+`config/99-nas-spindown.rules` is a template with placeholder serials — don't copy it verbatim. The real rule is generated **on the box** from the RAID member disks (not a device-letter glob), keyed on each disk's `ID_SERIAL_SHORT` so it follows the hardware through any `sdX` reorder. `-S 241` is a 30-minute standby timeout; root and the USB backup drive are excluded by construction (they aren't RAID members).
+
+See **[INSTALL.md](INSTALL.md) § 3** for the generator and verification commands. To check power state afterwards, query each RAID member by its current letter:
 
 ```bash
-command -v hdparm   # confirm path; adjust the RUN= path below if not /usr/sbin/hdparm
-{
-  echo '# NAS data-drive spindown -- hdparm -S 241 (30 min). Managed by nas-management.'
-  for d in /dev/sd[a-d]; do
-    serial=$(udevadm info --query=property --name="$d" | sed -n 's/^ID_SERIAL_SHORT=//p')
-    [ -n "$serial" ] && printf 'ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_SERIAL_SHORT}=="%s", RUN+="/usr/sbin/hdparm -S 241 /dev/%%k"\n' "$serial"
-  done
-} | sudo tee /etc/udev/rules.d/99-nas-spindown.rules
+awk '/^md[0-9]/{for(i=1;i<=NF;i++) if($i ~ /^sd[a-z]+[0-9]*\[/){d=$i; sub(/\[.*/,"",d); sub(/[0-9]+$/,"",d); print d}}' /proc/mdstat | sort -u | while read -r d; do
+  echo -n "$d: "; sudo hdparm -C "/dev/$d" | sed -n 's/.*drive state is: //p'
+done
 ```
 
-Apply without rebooting, then verify:
-
-```bash
-sudo udevadm control --reload-rules
-sudo udevadm trigger --action=add --subsystem-match=block
-for d in /dev/sd[a-d]; do echo -n "$d: "; sudo hdparm -C "$d" | sed -n 's/.*drive state is: //p'; done
-```
-
-`-S 241` is a 30-minute timeout. Drives `sde` (root) and `sdf` (backup) are excluded — the rule matches only the four data-drive serials. After a day, re-run `drive-usage-report` to confirm the standby heatmap climbs in idle hours and spin-up counts stay low.
+After a day, re-run `drive-usage-report` to confirm the standby heatmap climbs in idle hours and spin-up counts stay low.
 
 ### Login Status
 
