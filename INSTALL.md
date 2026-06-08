@@ -16,14 +16,15 @@ For the broader component overview see [README.md](README.md). What this runbook
 Device layout assumed here: `sda`–`sdd` data drives, `sde` root, `sdf` removable
 USB backup drive. Adjust the globs if your layout differs.
 
-## 1. Dependency
+## 1. Dependencies
 
-`hdparm` is already required by the repo; `sg3-utils` provides `sg_start` for the
-USB backup drive (its enclosure ignores ATA standby, so SCSI STOP UNIT is the only
-way to spin it down).
+`hdparm` is already required by the repo. For the USB backup drive (whose WD
+Elements enclosure ignores ATA standby): `sdparm` configures the enclosure's own
+SCSI standby timer (the actual spindown mechanism), and `sg3-utils` provides
+`sg_start` to park it immediately at the end of a backup.
 
 ```bash
-sudo apt install sg3-utils
+sudo apt install sg3-utils sdparm
 ```
 
 ## 2. Deploy the scripts
@@ -67,10 +68,33 @@ serial didn't make it in — re-run the generator. (`config/99-nas-spindown.rule
 in the repo is a placeholder template; the generator above is what produces the
 real file.)
 
-## 4. USB backup drive — `smartd` carve-out
+## 4. USB backup drive — enclosure standby timer (`sdparm`)
 
-The backup drive parks via `sg_start` (deployed in step 2), but `smartd`'s 30-min
-poll would wake it: this enclosure can't report power state, so smartd's
+The WD Elements enclosure ignores ATA standby (`hdparm`), and a one-shot SCSI
+`STOP UNIT` doesn't *hold* (the drive spins back up on the next access and nothing
+re-parks it). What works is the enclosure's own **STANDBY_Z timer**, which re-parks
+the drive after each idle period. It ships enabled with a 30-min timer; set a
+shorter, persistent value:
+
+```bash
+sudo sdparm --page=po /dev/sdf                              # inspect: STANDBY_Z 1, SZCT in 100ms units
+sudo sdparm --page=po --set=SZCT=9000 --save /dev/sdf       # 15-min timer, persists across power-cycle
+sudo sdparm --page=po /dev/sdf | grep -E 'STANDBY_Z|SZCT'   # confirm STANDBY_Z 1, SZCT 9000
+```
+
+`SZCT` is in 100 ms units (9000 = 15 min). The 2am `backup-run` also issues
+`sg_start --stop` at the end to park `sdf` immediately rather than waiting out the
+timer; the timer's role is to re-park it after any random daytime wake.
+
+Verify it actually parks: leave `sdf` **completely alone** for ~20 min (no
+`smartctl`/`hdparm`/`sdparm`/`ls`), then check the enclosure — quiet, LED flashing =
+parked. A `smartctl -A /dev/sdf` temperature read should show it has dropped well
+below the ~44 °C spinning-idle figure (the read itself wakes it again).
+
+## 5. USB backup drive — `smartd` carve-out
+
+The drive now parks itself (step 4), but `smartd`'s 30-min poll would be one of the
+wakes that prevents it: this enclosure can't report power state, so smartd's
 `-n standby` guard never detects standby. So `sdf` must come out of smartd.
 
 Generate explicit device lines for the **internal** drives only (`sda`–`sde`):
@@ -95,7 +119,7 @@ journalctl -u smartmontools -b | grep -iE 'Device:|Monitoring'
 
 Confirm it lists **five** devices and **`sdf` (the WD180EDGZ) is not among them**.
 
-## 5. Verify
+## 6. Verify
 
 ```bash
 # Park the backup drive now — expect "Backup drive spun down":
@@ -105,8 +129,11 @@ sudo backup-unmount
 disk-check                              # data drives show "standby (not woken)"
 ```
 
-Then leave `sdf` entirely alone for 10+ minutes (no `smartctl`/`hdparm`/`ls` on it)
-and listen — it should stay spun down and quiet. PWL clicking stops while parked.
+Then leave `sdf` entirely alone for ~20 minutes (no `smartctl`/`hdparm`/`ls` on it).
+Confirmed-good signs: the enclosure goes quiet, its LED flashes (standby), and a
+one-off `smartctl -A /dev/sdf` temperature read shows it dropped from ~44 °C
+(spinning) to the low-20s °C (parked). PWL clicking only happens while spinning, so
+it stops too.
 
 Over the next day, `drive-usage-report` should show the standby heatmap climbing in
 idle hours and spin-up counts staying low. The 2am `backup-run` spins `sdf` up,

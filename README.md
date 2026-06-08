@@ -141,7 +141,7 @@ If the drive is plugged in, it unlocks, mounts, runs whichever backup levels are
 
 ### Drive Spindown
 
-The backup drive is left connected 24/7 but only used at 2am, so `backup-run` (and `backup-unmount`) issue a SCSI **STOP UNIT** (`sg_start --stop`) once the drive is unmounted and locked, parking it for the rest of the day. This USB enclosure ignores ATA standby (`hdparm -S`/`-C` return `unknown`), so the SCSI command is the only way to spin it down; it's best-effort and never affects the backup's exit status.
+The backup drive is left connected 24/7 but only used at 2am. Its WD Elements enclosure ignores ATA standby (`hdparm -S`/`-C` return `unknown`), so spindown is handled two ways: the enclosure's own SCSI **STANDBY_Z timer** (set via `sdparm` to 15 min — see INSTALL.md) parks the drive after any idle period and re-parks it after stray wakes, and `backup-run`/`backup-unmount` additionally issue a SCSI **STOP UNIT** (`sg_start --stop`) once unmounted and locked to park it immediately rather than waiting out the timer. The `sg_start` step is best-effort and never affects the backup's exit status.
 
 Because this enclosure can't report power state, `smartd`'s `-n standby` guard can't tell the drive is parked, so a normal 30-min poll would wake it and undo the spindown. For that reason `smartd.conf` does **not** use `DEVICESCAN` — it lists the internal drives (`sda`–`sde`) explicitly by `/dev/disk/by-id/` and leaves `sdf` out. `backup-run` instead checks `sdf`'s SMART health and temperature while it's mounted and spun up, appending any problem to the disk alert file.
 
@@ -238,7 +238,7 @@ Additional per-file config:
 ### Dependencies
 
 ```bash
-sudo apt install smartmontools mdadm rsnapshot cryptsetup acl hdparm sg3-utils
+sudo apt install smartmontools mdadm rsnapshot cryptsetup acl hdparm sg3-utils sdparm
 ```
 
 ## File Inventory
