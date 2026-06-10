@@ -123,11 +123,13 @@ to.
 
 ## Documentation updates
 
-- `README.md`: the `sda`–`sdd` sampler description, the rotation note, and the
-  `~/.drive-usage.log` example header.
-- `docs/superpowers/specs/2026-04-27-drive-usage-monitoring-design.md` and the
-  matching plan: log-format and identity wording where they reference the
-  `drive` column or `sda`-style keys.
+- `README.md` (the living doc): the `sda`–`sdd` sampler description, the
+  `~/.drive-usage.log` example CSV header/rows, and the report's "Reading the
+  Report" wording where it implies letter-keyed columns.
+- The dated `docs/superpowers/specs/2026-04-27-drive-usage-monitoring-design.md`
+  and its plan are point-in-time records of what was originally built and are
+  **left unedited** — this spec supersedes them. Rewriting them would falsify the
+  history.
 
 ## Testing
 
