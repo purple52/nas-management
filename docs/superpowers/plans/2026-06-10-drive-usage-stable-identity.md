@@ -137,6 +137,17 @@ Replace the entire loop with:
 for dev_path in $DISK_DEVICES; do
     kname=$(basename "$dev_path")
 
+    # Look up this drive in the snapshot by kernel name (diskstats is letter-keyed);
+    # field 3 = name, 6 = sectors read, 10 = sectors written. An absent drive has
+    # no row here and is skipped before we spend a udevadm call on it. Its previous
+    # state entry is intentionally not carried forward: DISK_DEVICES is the RAID
+    # members from /proc/mdstat, which are always present, so there is nothing to
+    # preserve.
+    read -r cur_read cur_write < <(awk -v d="$kname" '$3 == d {print $6, $10; exit}' <<< "$DISKSTATS")
+    if [ -z "${cur_read:-}" ]; then
+        continue
+    fi
+
     # Persistent identity is the drive's stable serial, NOT its kernel letter:
     # letters reorder across reboots, which would blend two physical disks in
     # the historical log. Prefer ID_SERIAL_SHORT (matches 99-nas-spindown.rules),
@@ -145,14 +156,6 @@ for dev_path in $DISK_DEVICES; do
     serial=$(udevadm info -q property -n "$dev_path" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p')
     [ -z "$serial" ] && serial=$(udevadm info -q property -n "$dev_path" 2>/dev/null | sed -n 's/^ID_WWN=//p')
     [ -z "$serial" ] && { serial="kname-$kname"; echo "drive-usage-sample: no serial for $kname, using $serial" >&2; }
-
-    # Look up this drive in the snapshot by kernel name (diskstats is letter-keyed);
-    # field 3 = name, 6 = sectors read, 10 = sectors written. An absent drive has
-    # no row here and is skipped — no separate [ -b ] branch needed.
-    read -r cur_read cur_write < <(awk -v d="$kname" '$3 == d {print $6, $10; exit}' <<< "$DISKSTATS")
-    if [ -z "${cur_read:-}" ]; then
-        continue
-    fi
 
     prev_r=${PREV_READ["$serial"]:-}
     prev_w=${PREV_WRITE["$serial"]:-}
