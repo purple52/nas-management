@@ -115,58 +115,58 @@ fi
 # Paste the local-hour + epoch columns onto the data rows, then process in awk.
 paste -d, "$HOURS_FILE" "$DATA_FILE" | awk -F, \
     -v serial_list="$SERIAL_LIST" -v label_list="$LABEL_LIST" -v legend="$LEGEND" '
-function record_run(drive, len) {
-    if (len > longest[drive]) longest[drive] = len
-    if (len*15 >= 60)  count_1h[drive]++
-    if (len*15 >= 120) count_2h[drive]++
-    if (len*15 >= 240) count_4h[drive]++
+function record_run(serial, len) {
+    if (len > longest[serial]) longest[serial] = len
+    if (len*15 >= 60)  count_1h[serial]++
+    if (len*15 >= 120) count_2h[serial]++
+    if (len*15 >= 240) count_4h[serial]++
 }
 BEGIN {
     n_drives = split(serial_list, drives, " ")
     split(label_list, labels, " ")
 }
 {
-    # $1=local hour, $2=epoch seconds, $3=ts (UTC), $4=drive, $5=read_bytes, $6=write_bytes, $7=power_state
-    h = $1 + 0; epoch = $2 + 0; ts = $3; drive = $4; rb = $5 + 0; wb = $6 + 0; power = $7
+    # $1=local hour, $2=epoch seconds, $3=ts (UTC), $4=serial, $5=read_bytes, $6=write_bytes, $7=power_state
+    h = $1 + 0; epoch = $2 + 0; ts = $3; serial = $4; rb = $5 + 0; wb = $6 + 0; power = $7
     active = (rb + wb > 0) ? 1 : 0
     parked = (power == "standby" || power == "sleeping") ? 1 : 0
 
     # Heatmap accumulator
-    bucket_total[drive, h]++
-    if (active) bucket_active[drive, h]++
-    if (parked) bucket_parked[drive, h]++
+    bucket_total[serial, h]++
+    if (active) bucket_active[serial, h]++
+    if (parked) bucket_parked[serial, h]++
 
     # Gap detection: a missing cron tick or absent-drive interval must break
     # both the idle run and the prev-state continuity. A wake transition
     # cannot be claimed across a gap since intervening state is unknown.
-    gap = ((drive in last_epoch) && epoch - last_epoch[drive] > 16*60)
+    gap = ((serial in last_epoch) && epoch - last_epoch[serial] > 16*60)
     if (gap) {
-        if (current_run[drive] > 0) {
-            record_run(drive, current_run[drive])
-            current_run[drive] = 0
+        if (current_run[serial] > 0) {
+            record_run(serial, current_run[serial])
+            current_run[serial] = 0
         }
-        delete prev_power[drive]
+        delete prev_power[serial]
     }
 
     if (active) {
-        if (current_run[drive] > 0) {
-            record_run(drive, current_run[drive])
-            current_run[drive] = 0
+        if (current_run[serial] > 0) {
+            record_run(serial, current_run[serial])
+            current_run[serial] = 0
         }
     } else {
-        current_run[drive]++
+        current_run[serial]++
     }
 
     # Spin-up event: transition out of parked into active/idle. Counted
     # regardless of whether this sample itself logged I/O, because the
     # drive having woken up is the wear-cost event being tracked.
-    if ((drive in prev_power) && (prev_power[drive] == "standby" || prev_power[drive] == "sleeping") \
+    if ((serial in prev_power) && (prev_power[serial] == "standby" || prev_power[serial] == "sleeping") \
         && power == "active/idle") {
-        spinups[drive]++
+        spinups[serial]++
     }
-    prev_power[drive] = power
+    prev_power[serial] = power
 
-    last_epoch[drive] = epoch
+    last_epoch[serial] = epoch
     date_part = substr(ts, 1, 10)
     if (first_date == "" || date_part < first_date) first_date = date_part
     if (date_part > last_date) last_date = date_part
