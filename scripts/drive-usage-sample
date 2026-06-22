@@ -8,7 +8,7 @@ source /etc/nas-management.conf
 LOG="$DRIVE_USAGE_LOG"
 STATE="$DRIVE_USAGE_STATE"
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S)
-EXPECTED_HEADER="timestamp,drive,read_bytes,write_bytes,power_state"
+EXPECTED_HEADER="timestamp,serial,read_bytes,write_bytes,power_state"
 
 # Ensure log has the expected CSV header; refuse to append if the format has
 # drifted (e.g. pre-spindown 4-column log). Operator must rotate manually.
@@ -37,14 +37,14 @@ fi
 # Load previous counters into associative arrays, validating numeric format
 declare -A PREV_READ PREV_WRITE
 if [ -f "$STATE" ]; then
-    while read -r drive r w; do
-        [ -z "$drive" ] && continue
+    while read -r id r w; do
+        [ -z "$id" ] && continue
         if ! [[ "$r" =~ ^[0-9]+$ ]] || ! [[ "$w" =~ ^[0-9]+$ ]]; then
-            echo "drive-usage-sample: malformed state for $drive: '$r' '$w'" >&2
+            echo "drive-usage-sample: malformed state for $id: '$r' '$w'" >&2
             exit 1
         fi
-        PREV_READ["$drive"]=$r
-        PREV_WRITE["$drive"]=$w
+        PREV_READ["$id"]=$r
+        PREV_WRITE["$id"]=$w
     done < "$STATE"
 fi
 
@@ -61,29 +61,27 @@ trap 'rm -f "$NEW_STATE"' EXIT
 
 # shellcheck disable=SC2086
 for dev_path in $DISK_DEVICES; do
-    drive=$(basename "$dev_path")
+    kname=$(basename "$dev_path")
 
-    # If drive is currently absent, preserve previous state entry untouched
-    if [ ! -b "$dev_path" ]; then
-        prev_r=${PREV_READ["$drive"]:-}
-        prev_w=${PREV_WRITE["$drive"]:-}
-        if [ -n "$prev_r" ]; then
-            if ! echo "$drive $prev_r $prev_w" >> "$NEW_STATE"; then
-                echo "drive-usage-sample: cannot append to temp state file" >&2
-                exit 1
-            fi
-        fi
-        continue
-    fi
+    # Persistent identity is the drive's stable serial, NOT its kernel letter:
+    # letters reorder across reboots, which would blend two physical disks in
+    # the historical log. Prefer ID_SERIAL_SHORT (matches 99-nas-spindown.rules),
+    # fall back to ID_WWN, then to a clearly-degraded kname-<letter> so a
+    # serial-less drive is flagged rather than silently masquerading as stable.
+    serial=$(udevadm info -q property -n "$dev_path" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p')
+    [ -z "$serial" ] && serial=$(udevadm info -q property -n "$dev_path" 2>/dev/null | sed -n 's/^ID_WWN=//p')
+    [ -z "$serial" ] && { serial="kname-$kname"; echo "drive-usage-sample: no serial for $kname, using $serial" >&2; }
 
-    # Look up this drive in the snapshot; field 3 = name, 6 = sectors read, 10 = sectors written
-    read -r cur_read cur_write < <(awk -v d="$drive" '$3 == d {print $6, $10; exit}' <<< "$DISKSTATS")
+    # Look up this drive in the snapshot by kernel name (diskstats is letter-keyed);
+    # field 3 = name, 6 = sectors read, 10 = sectors written. An absent drive has
+    # no row here and is skipped — no separate [ -b ] branch needed.
+    read -r cur_read cur_write < <(awk -v d="$kname" '$3 == d {print $6, $10; exit}' <<< "$DISKSTATS")
     if [ -z "${cur_read:-}" ]; then
         continue
     fi
 
-    prev_r=${PREV_READ["$drive"]:-}
-    prev_w=${PREV_WRITE["$drive"]:-}
+    prev_r=${PREV_READ["$serial"]:-}
+    prev_w=${PREV_WRITE["$serial"]:-}
 
     # Log a row only when we have a usable previous sample (counters monotonic)
     if [ -n "$prev_r" ] && [ -n "$prev_w" ] \
@@ -98,13 +96,13 @@ for dev_path in $DISK_DEVICES; do
         power_state=$(hdparm -C "$dev_path" 2>/dev/null | awk '/drive state is:/ {print $NF; exit}')
         [ -z "$power_state" ] && power_state="unknown"
 
-        if ! echo "$TIMESTAMP,$drive,$delta_r,$delta_w,$power_state" >> "$LOG"; then
+        if ! echo "$TIMESTAMP,$serial,$delta_r,$delta_w,$power_state" >> "$LOG"; then
             echo "drive-usage-sample: cannot append to $LOG" >&2
             exit 1
         fi
     fi
 
-    if ! echo "$drive $cur_read $cur_write" >> "$NEW_STATE"; then
+    if ! echo "$serial $cur_read $cur_write" >> "$NEW_STATE"; then
         echo "drive-usage-sample: cannot append to temp state file" >&2
         exit 1
     fi
