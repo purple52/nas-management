@@ -61,12 +61,12 @@ A 15-minute sampler that captures per-drive I/O activity and power state over ti
 
 ### How It Works
 
-Every 15 minutes, cron runs `drive-usage-sample`. The script reads cumulative read/write counters for `sda`–`sdd` from `/proc/diskstats`, diffs them against the previous run's values stored in `~/.drive-usage-state`, queries each drive's power state via `hdparm -C` (which does not spin the drive up, unlike `smartctl`), and appends one CSV row per drive to `~/.drive-usage.log`:
+Every 15 minutes, cron runs `drive-usage-sample`. For each RAID member disk (resolved from `/proc/mdstat`), the script reads cumulative read/write counters from `/proc/diskstats`, diffs them against the previous run's values stored in `~/.drive-usage-state`, queries the drive's power state via `hdparm -C` (which does not spin the drive up, unlike `smartctl`), and appends one CSV row per drive to `~/.drive-usage.log`. Each row is keyed by the drive's stable serial (`ID_SERIAL_SHORT`), not its `sdX` letter — kernel letters reorder across reboots, which would otherwise blend two physical disks in the historical log:
 
 ```
-timestamp,drive,read_bytes,write_bytes,power_state
-2026-04-27T14:15:00,sda,0,0,standby
-2026-04-27T14:15:00,sdb,131072,8192,active/idle
+timestamp,serial,read_bytes,write_bytes,power_state
+2026-04-27T14:15:00,WD-WCC4E1H8KP2L,0,0,standby
+2026-04-27T14:15:00,WD-WCC4E2J9NR7M,131072,8192,active/idle
 ...
 ```
 
@@ -83,7 +83,7 @@ If the log format changes (e.g. a new column is added), both scripts refuse to r
 
 ### Reading the Report
 
-Four views:
+The report aggregates by serial but resolves each one back to its current `/dev/sdX` for the column headers, with a `legend:` line mapping letter→serial above the heatmaps. A drive no longer attached (e.g. swapped out) keeps its history under its serial, shown in place of a letter. Four views:
 - **Hour-of-day I/O heatmap:** % of samples with any I/O, by hour (localtime). Reveals quiet windows.
 - **Idle-run summary:** longest no-I/O run per drive plus counts of runs >=1h, >=2h, >=4h. Tells you whether a candidate `hdparm` timeout would actually catch idle time.
 - **Hour-of-day standby heatmap:** % of samples in `standby`/`sleeping`, by hour. After enabling spindown, this should be near 100 during the hours the I/O heatmap is 0. Discrepancies mean the timeout is too long or something is touching the drive.
