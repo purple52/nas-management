@@ -8,7 +8,7 @@ source /etc/nas-management.conf
 
 LOG="$DRIVE_USAGE_LOG"
 MIN_TICKS=96  # 1 day × 96 samples (15-min interval)
-EXPECTED_HEADER="timestamp,drive,read_bytes,write_bytes,power_state"
+EXPECTED_HEADER="timestamp,serial,read_bytes,write_bytes,power_state"
 
 # Missing log is the trivial zero-data case
 if [ ! -f "$LOG" ]; then
@@ -27,13 +27,6 @@ if [ "$first_line" != "$EXPECTED_HEADER" ]; then
     exit 1
 fi
 
-# Drive list from DISK_DEVICES (the RAID member disks, resolved in the config)
-DRIVE_LIST=""
-# shellcheck disable=SC2086
-for dev_path in $DISK_DEVICES; do
-    DRIVE_LIST="$DRIVE_LIST $(basename "$dev_path")"
-done
-
 # Snapshot the data so a concurrent cron append can't desync the two passes.
 DATA_FILE=$(mktemp) || { echo "drive-usage-report: cannot create temp file" >&2; exit 1; }
 HOURS_FILE=$(mktemp) || { echo "drive-usage-report: cannot create temp file" >&2; exit 1; }
@@ -48,6 +41,54 @@ if [ "$TICK_COUNT" -lt "$MIN_TICKS" ]; then
     echo "Not enough data yet — collected $TICK_COUNT samples; recommend waiting for at least 1 day."
     exit 0
 fi
+
+# Map each currently-attached drive's serial to its kernel letter, so the report
+# can show friendly sda-style headers while keying aggregation on the stable
+# serial. Same resolver as drive-usage-sample (ID_SERIAL_SHORT → ID_WWN → kname).
+declare -A SERIAL_TO_LETTER
+# shellcheck disable=SC2086
+for dev_path in $DISK_DEVICES; do
+    kname=$(basename "$dev_path")
+    s=$(udevadm info -q property -n "$dev_path" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p')
+    [ -z "$s" ] && s=$(udevadm info -q property -n "$dev_path" 2>/dev/null | sed -n 's/^ID_WWN=//p')
+    [ -z "$s" ] && s="kname-$kname"
+    SERIAL_TO_LETTER["$s"]="$kname"
+done
+
+# Serials present in the log (column 2). Order: currently-attached drives first,
+# sorted by their kernel letter; then any since-replaced serials (no current
+# letter), sorted by serial — so a swapped-out disk still shows its history.
+LOG_SERIALS=$(awk -F, '{print $2}' "$DATA_FILE" | sort -u)
+present_ordered=$(
+    for s in $LOG_SERIALS; do
+        l=${SERIAL_TO_LETTER["$s"]:-}
+        [ -n "$l" ] && echo "$l $s"
+    done | sort | awk '{print $2}'
+)
+absent_ordered=$(
+    for s in $LOG_SERIALS; do
+        [ -z "${SERIAL_TO_LETTER["$s"]:-}" ] && echo "$s"
+    done | sort
+)
+
+# SERIAL_LIST = aggregation keys (serials); LABEL_LIST = display headers (current
+# letter when attached, else the bare serial); LEGEND maps letter→serial for the
+# attached drives only (absent columns show the serial directly, so need no key).
+SERIAL_LIST=""
+LABEL_LIST=""
+LEGEND=""
+legend_sep=""
+for s in $present_ordered; do
+    l=${SERIAL_TO_LETTER["$s"]}
+    SERIAL_LIST="$SERIAL_LIST $s"
+    LABEL_LIST="$LABEL_LIST $l"
+    LEGEND="$LEGEND$legend_sep$l=$s"
+    legend_sep=", "
+done
+for s in $absent_ordered; do
+    SERIAL_LIST="$SERIAL_LIST $s"
+    LABEL_LIST="$LABEL_LIST $s"
+done
 
 # Per-row UTC→localtime conversion via a single batch `date -f -` invocation.
 # Correct across DST transitions — each timestamp is converted in its own right,
@@ -73,7 +114,7 @@ fi
 
 # Paste the local-hour + epoch columns onto the data rows, then process in awk.
 paste -d, "$HOURS_FILE" "$DATA_FILE" | awk -F, \
-    -v drive_list="$DRIVE_LIST" '
+    -v serial_list="$SERIAL_LIST" -v label_list="$LABEL_LIST" -v legend="$LEGEND" '
 function record_run(drive, len) {
     if (len > longest[drive]) longest[drive] = len
     if (len*15 >= 60)  count_1h[drive]++
@@ -81,7 +122,8 @@ function record_run(drive, len) {
     if (len*15 >= 240) count_4h[drive]++
 }
 BEGIN {
-    n_drives = split(drive_list, drives, " ")
+    n_drives = split(serial_list, drives, " ")
+    split(label_list, labels, " ")
 }
 {
     # $1=local hour, $2=epoch seconds, $3=ts (UTC), $4=drive, $5=read_bytes, $6=write_bytes, $7=power_state
@@ -141,8 +183,9 @@ END {
 
     # ---- Heatmap ----
     printf "Hour-of-day activity (%% of samples with I/O):\n\n"
+    if (legend != "") printf "  legend: %s\n\n", legend
     printf "      "
-    for (i = 1; i <= n_drives; i++) printf " %4s", drives[i]
+    for (i = 1; i <= n_drives; i++) printf " %4s", labels[i]
     printf "\n"
     for (hr = 0; hr < 24; hr++) {
         printf "  %02d  ", hr
@@ -164,7 +207,7 @@ END {
         d = drives[i]
         l = longest[d] + 0
         printf "  %s:  longest %dh%02dm | runs >=1h: %d | >=2h: %d | >=4h: %d\n", \
-            d, int(l*15/60), (l*15)%60, count_1h[d]+0, count_2h[d]+0, count_4h[d]+0
+            labels[i], int(l*15/60), (l*15)%60, count_1h[d]+0, count_2h[d]+0, count_4h[d]+0
     }
 
     # ---- Standby heatmap ----
@@ -172,7 +215,7 @@ END {
     # windows. Should be high (close to 100) during hours the I/O heatmap is 0.
     printf "\nHour-of-day standby (%% of samples parked):\n\n"
     printf "      "
-    for (i = 1; i <= n_drives; i++) printf " %4s", drives[i]
+    for (i = 1; i <= n_drives; i++) printf " %4s", labels[i]
     printf "\n"
     for (hr = 0; hr < 24; hr++) {
         printf "  %02d  ", hr
@@ -195,7 +238,7 @@ END {
         d = drives[i]
         total = spinups[d] + 0
         per_day = (n_days > 0) ? (total / n_days) : 0
-        printf "  %s:  total %d over %d days (%.1f/day)\n", d, total, n_days, per_day
+        printf "  %s:  total %d over %d days (%.1f/day)\n", labels[i], total, n_days, per_day
     }
 }
 '
