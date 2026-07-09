@@ -1,0 +1,244 @@
+#!/bin/bash
+# On-demand report: hour-of-day activity heatmap + idle-run summary.
+# Reads ~/.drive-usage.log produced by drive-usage-sample.
+
+set -u
+set -o pipefail
+source /etc/nas-management.conf
+
+LOG="$DRIVE_USAGE_LOG"
+MIN_TICKS=96  # 1 day × 96 samples (15-min interval)
+EXPECTED_HEADER="timestamp,serial,read_bytes,write_bytes,power_state"
+
+# Missing log is the trivial zero-data case
+if [ ! -f "$LOG" ]; then
+    echo "Not enough data yet — collected 0 samples; recommend waiting for at least 1 day."
+    exit 0
+fi
+
+# Refuse stale-format logs: standby/wake-up views would silently report zeros
+# if power_state columns were absent. Force the operator to rotate.
+first_line=$(head -n 1 "$LOG" 2>/dev/null || true)
+if [ "$first_line" != "$EXPECTED_HEADER" ]; then
+    echo "drive-usage-report: log header mismatch at $LOG" >&2
+    echo "drive-usage-report:   expected: $EXPECTED_HEADER" >&2
+    echo "drive-usage-report:   found:    $first_line" >&2
+    echo "drive-usage-report: rotate to upgrade: rm $LOG" >&2
+    exit 1
+fi
+
+# Snapshot the data so a concurrent cron append can't desync the two passes.
+DATA_FILE=$(mktemp) || { echo "drive-usage-report: cannot create temp file" >&2; exit 1; }
+HOURS_FILE=$(mktemp) || { echo "drive-usage-report: cannot create temp file" >&2; exit 1; }
+trap 'rm -f "$DATA_FILE" "$HOURS_FILE"' EXIT
+tail -n +2 "$LOG" > "$DATA_FILE"
+
+# Count unique timestamp ticks — same unit the report's "Collected: N samples"
+# footer uses, so the guard message and the footer can never disagree on the
+# same data. (CSV row count would be ticks × n_drives.)
+TICK_COUNT=$(awk -F, '{seen[$1]=1} END {n=0; for (k in seen) n++; print n+0}' "$DATA_FILE")
+if [ "$TICK_COUNT" -lt "$MIN_TICKS" ]; then
+    echo "Not enough data yet — collected $TICK_COUNT samples; recommend waiting for at least 1 day."
+    exit 0
+fi
+
+# Map each currently-attached drive's serial to its kernel letter, so the report
+# can show friendly sda-style headers while keying aggregation on the stable
+# serial. Same resolver as drive-usage-sample (ID_SERIAL_SHORT → ID_WWN → kname).
+declare -A SERIAL_TO_LETTER
+# shellcheck disable=SC2086
+for dev_path in $DISK_DEVICES; do
+    kname=$(basename "$dev_path")
+    s=$(udevadm info -q property -n "$dev_path" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p')
+    [ -z "$s" ] && s=$(udevadm info -q property -n "$dev_path" 2>/dev/null | sed -n 's/^ID_WWN=//p')
+    [ -z "$s" ] && s="kname-$kname"
+    SERIAL_TO_LETTER["$s"]="$kname"
+done
+
+# Serials present in the log (column 2). Order: currently-attached drives first,
+# sorted by their kernel letter; then any since-replaced serials (no current
+# letter), sorted by serial — so a swapped-out disk still shows its history.
+LOG_SERIALS=$(awk -F, '{print $2}' "$DATA_FILE" | sort -u)
+present_ordered=$(
+    for s in $LOG_SERIALS; do
+        l=${SERIAL_TO_LETTER["$s"]:-}
+        [ -n "$l" ] && echo "$l $s"
+    done | sort | awk '{print $2}'
+)
+absent_ordered=$(
+    for s in $LOG_SERIALS; do
+        [ -z "${SERIAL_TO_LETTER["$s"]:-}" ] && echo "$s"
+    done | sort
+)
+
+# SERIAL_LIST = aggregation keys (serials); LABEL_LIST = display headers (current
+# letter when attached, else the bare serial); LEGEND maps letter→serial for the
+# attached drives only (absent columns show the serial directly, so need no key).
+SERIAL_LIST=""
+LABEL_LIST=""
+LEGEND=""
+legend_sep=""
+for s in $present_ordered; do
+    l=${SERIAL_TO_LETTER["$s"]}
+    SERIAL_LIST="$SERIAL_LIST $s"
+    LABEL_LIST="$LABEL_LIST $l"
+    LEGEND="$LEGEND$legend_sep$l=$s"
+    legend_sep=", "
+done
+for s in $absent_ordered; do
+    SERIAL_LIST="$SERIAL_LIST $s"
+    LABEL_LIST="$LABEL_LIST $s"
+done
+
+# Per-row UTC→localtime conversion via a single batch `date -f -` invocation.
+# Correct across DST transitions — each timestamp is converted in its own right,
+# unlike a single `date +%z` snapshot which would bake one fixed offset into
+# rows that span a transition.
+#
+# Emit "<local-hour>,<epoch-seconds>" per line so the awk pass can both bucket
+# by hour and detect missing-sample gaps (idle runs must not span them).
+if ! awk -F, '{ts=$1; sub(/T/," ",ts); print ts " UTC"}' "$DATA_FILE" \
+        | date -f - "+%H,%s" > "$HOURS_FILE"; then
+    echo "drive-usage-report: timestamp conversion failed (date -f -)" >&2
+    exit 1
+fi
+
+# Defence in depth: paste only works correctly when both files have the same
+# row count. A short HOURS_FILE would silently mis-align the columns.
+data_lines=$(wc -l < "$DATA_FILE")
+hour_lines=$(wc -l < "$HOURS_FILE")
+if [ "$data_lines" -ne "$hour_lines" ]; then
+    echo "drive-usage-report: timestamp conversion produced $hour_lines lines for $data_lines data rows" >&2
+    exit 1
+fi
+
+# Paste the local-hour + epoch columns onto the data rows, then process in awk.
+paste -d, "$HOURS_FILE" "$DATA_FILE" | awk -F, \
+    -v serial_list="$SERIAL_LIST" -v label_list="$LABEL_LIST" -v legend="$LEGEND" '
+function record_run(serial, len) {
+    if (len > longest[serial]) longest[serial] = len
+    if (len*15 >= 60)  count_1h[serial]++
+    if (len*15 >= 120) count_2h[serial]++
+    if (len*15 >= 240) count_4h[serial]++
+}
+BEGIN {
+    n_drives = split(serial_list, drives, " ")
+    split(label_list, labels, " ")
+}
+{
+    # $1=local hour, $2=epoch seconds, $3=ts (UTC), $4=serial, $5=read_bytes, $6=write_bytes, $7=power_state
+    h = $1 + 0; epoch = $2 + 0; ts = $3; serial = $4; rb = $5 + 0; wb = $6 + 0; power = $7
+    active = (rb + wb > 0) ? 1 : 0
+    parked = (power == "standby" || power == "sleeping") ? 1 : 0
+
+    # Heatmap accumulator
+    bucket_total[serial, h]++
+    if (active) bucket_active[serial, h]++
+    if (parked) bucket_parked[serial, h]++
+
+    # Gap detection: a missing cron tick or absent-drive interval must break
+    # both the idle run and the prev-state continuity. A wake transition
+    # cannot be claimed across a gap since intervening state is unknown.
+    gap = ((serial in last_epoch) && epoch - last_epoch[serial] > 16*60)
+    if (gap) {
+        if (current_run[serial] > 0) {
+            record_run(serial, current_run[serial])
+            current_run[serial] = 0
+        }
+        delete prev_power[serial]
+    }
+
+    if (active) {
+        if (current_run[serial] > 0) {
+            record_run(serial, current_run[serial])
+            current_run[serial] = 0
+        }
+    } else {
+        current_run[serial]++
+    }
+
+    # Spin-up event: transition out of parked into active/idle. Counted
+    # regardless of whether this sample itself logged I/O, because the
+    # drive having woken up is the wear-cost event being tracked.
+    if ((serial in prev_power) && (prev_power[serial] == "standby" || prev_power[serial] == "sleeping") \
+        && power == "active/idle") {
+        spinups[serial]++
+    }
+    prev_power[serial] = power
+
+    last_epoch[serial] = epoch
+    date_part = substr(ts, 1, 10)
+    if (first_date == "" || date_part < first_date) first_date = date_part
+    if (date_part > last_date) last_date = date_part
+    samples_seen[ts] = 1
+    days_seen[date_part] = 1
+}
+END {
+    for (d in current_run) {
+        if (current_run[d] > 0) record_run(d, current_run[d])
+    }
+
+    n_samples = 0; for (t in samples_seen) n_samples++
+    n_days = 0;    for (d in days_seen)    n_days++
+
+    # ---- Heatmap ----
+    printf "Hour-of-day activity (%% of samples with I/O):\n\n"
+    if (legend != "") printf "  legend: %s\n\n", legend
+    printf "      "
+    for (i = 1; i <= n_drives; i++) printf " %4s", labels[i]
+    printf "\n"
+    for (hr = 0; hr < 24; hr++) {
+        printf "  %02d  ", hr
+        for (i = 1; i <= n_drives; i++) {
+            d = drives[i]
+            tot = bucket_total[d, hr] + 0
+            act = bucket_active[d, hr] + 0
+            pct = (tot == 0) ? 0 : int(act * 100 / tot + 0.5)
+            printf " %4d", pct
+        }
+        printf "\n"
+    }
+    printf "\nCollected: %s to %s (%d days, %d samples)\n\n", \
+        first_date, last_date, n_days, n_samples
+
+    # ---- Idle runs ----
+    printf "Idle runs (consecutive 15-min windows with no I/O):\n\n"
+    for (i = 1; i <= n_drives; i++) {
+        d = drives[i]
+        l = longest[d] + 0
+        printf "  %s:  longest %dh%02dm | runs >=1h: %d | >=2h: %d | >=4h: %d\n", \
+            labels[i], int(l*15/60), (l*15)%60, count_1h[d]+0, count_2h[d]+0, count_4h[d]+0
+    }
+
+    # ---- Standby heatmap ----
+    # Shows whether hdparm spindown is actually engaging during expected idle
+    # windows. Should be high (close to 100) during hours the I/O heatmap is 0.
+    printf "\nHour-of-day standby (%% of samples parked):\n\n"
+    printf "      "
+    for (i = 1; i <= n_drives; i++) printf " %4s", labels[i]
+    printf "\n"
+    for (hr = 0; hr < 24; hr++) {
+        printf "  %02d  ", hr
+        for (i = 1; i <= n_drives; i++) {
+            d = drives[i]
+            tot = bucket_total[d, hr] + 0
+            par = bucket_parked[d, hr] + 0
+            pct = (tot == 0) ? 0 : int(par * 100 / tot + 0.5)
+            printf " %4d", pct
+        }
+        printf "\n"
+    }
+
+    # ---- Spin-up events ----
+    # Each transition standby/sleeping → active/idle is one wear cycle.
+    # Aim for a handful per day per drive; a high number suggests the timeout
+    # is too short for the workload.
+    printf "\nSpin-up events (standby/sleeping → active/idle transitions):\n\n"
+    for (i = 1; i <= n_drives; i++) {
+        d = drives[i]
+        total = spinups[d] + 0
+        per_day = (n_days > 0) ? (total / n_days) : 0
+        printf "  %s:  total %d over %d days (%.1f/day)\n", labels[i], total, n_days, per_day
+    }
+}
+'

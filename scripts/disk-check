@@ -2,8 +2,10 @@
 source /etc/nas-management.conf
 SHOW_TEMPS=false
 
-# Show temps if running with sudo or if smartctl is passwordless
-if [ "$EUID" -eq 0 ] || sudo -n smartctl -i /dev/sda >/dev/null 2>&1; then
+# Show temps if running as root, or if passwordless sudo for smartctl works.
+# Probe with --version (no device) so it neither assumes a device letter nor
+# spins a drive up — the per-drive reads below use -n standby to stay wake-safe.
+if [ "$EUID" -eq 0 ] || sudo -n smartctl --version >/dev/null 2>&1; then
     SHOW_TEMPS=true
 fi
 
@@ -60,8 +62,16 @@ if $SHOW_TEMPS; then
     # shellcheck disable=SC2086
     for dev in $DISK_DEVICES; do
         [ -b "$dev" ] || continue
-        TEMP=$(sudo smartctl -A "$dev" 2>/dev/null | grep -i temperature | head -1 | awk -F "- *" '{print $2}' | awk '{print $1}')
-        MODEL=$(sudo smartctl -i "$dev" 2>/dev/null | grep "Device Model" | sed 's/.*: *//')
+        # -n standby: read SMART only if the drive is already spinning. A parked
+        # drive is reported as standby rather than woken — reading attributes
+        # otherwise spins it up, defeating spindown on every login.
+        ATTRS=$(sudo smartctl -n standby -A "$dev" 2>/dev/null)
+        if [ $(( $? & 2 )) -ne 0 ]; then
+            echo "  $dev: standby (not woken)"
+            continue
+        fi
+        TEMP=$(echo "$ATTRS" | grep -i temperature | head -1 | awk -F "- *" '{print $2}' | awk '{print $1}')
+        MODEL=$(sudo smartctl -n standby -i "$dev" 2>/dev/null | grep "Device Model" | sed 's/.*: *//')
         if [ -n "$TEMP" ]; then
             if [ "$TEMP" -gt "$TEMP_WARN_C" ]; then
                 echo "  $dev ($MODEL): ${TEMP}°C ⚠ HOT"
